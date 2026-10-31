@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>YOUYOU Linux — desktop and tablet</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#203659"/>
+      <stop offset="1" stop-color="#10233e"/>
+    </linearGradient>
+    <linearGradient id="desktop" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#7be1e5"/>
+      <stop offset="1" stop-color="#68bafa"/>
+    </linearGradient>
+    <clipPath id="desktop-glass"><rect x="43" y="62" width="139" height="89" rx="8"/></clipPath>
+    <clipPath id="tablet-glass"><rect x="129" y="139" width="82" height="53" rx="5"/></clipPath>
+  </defs>
+  <rect x="5" y="5" width="246" height="246" rx="58" fill="url(#tile)"/>
+  <path d="M99 151h21v24l15 6v5H82v-5l17-6z" fill="#d2edf7"/>
+  <rect x="34" y="52" width="157" height="111" rx="15" fill="#edf7ff"/>
+  <g clip-path="url(#desktop-glass)">
+    <rect x="43" y="62" width="139" height="89" fill="url(#desktop)"/>
+    <path d="M39 134c29-4 42-28 66-30 26-2 34 17 52 15 9 0 19-5 30-14v52H39z" fill="#2288c9"/>
+    <path d="M38 150c25 0 45-8 64-19 25-16 43-17 83-4v30H38z" fill="#28609e"/>
+  </g>
+  <rect x="117" y="126" width="106" height="80" rx="15" fill="#162b46"/>
+  <rect x="121" y="130" width="98" height="71" rx="12" fill="#eff8ff"/>
+  <g clip-path="url(#tablet-glass)">
+    <rect x="129" y="139" width="82" height="53" fill="#68cddb"/>
+    <path d="M126 185c14-2 23-20 39-22 17-2 30 9 50-3v37h-89z" fill="#218cc1"/>
+    <path d="M126 192c21-1 35-5 51-15 10-6 22-6 38-4v24h-89z" fill="#24639c"/>
+  </g>
+</svg>

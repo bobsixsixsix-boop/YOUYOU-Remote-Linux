@@ -1,0 +1,302 @@
+--- a/transport.cpp
++++ b/transport.cpp
+@@ -93,6 +93,14 @@
+     auto json = Json::parse(response, nullptr, false);
+     if (json.is_discarded() || !json.is_object())
+         throw std::runtime_error("UU returned an invalid response (HTTP " + std::to_string(status) + ")");
++    // The device list endpoint can report an expired bearer as HTTP 422
++    // with service code 1120. Clear only that explicit authentication failure.
++    const auto errorCode = json.find("code");
++    if (status == 422 && !token_.empty() && errorCode != json.end() &&
++        errorCode->is_number_integer() && *errorCode == 1120) {
++        logout();
++        throw std::runtime_error("登录已失效，请重新登录");
++    }
+     if (status < 200 || status >= 300 || json.value("code", -1) != 0)
+         throw std::runtime_error(json.value("msg", std::string("UU request failed")));
+     return json.value("data", Json{});
+@@ -101,17 +109,17 @@
+     if (!device_.empty())
+         return;
+     auto d = request("POST", "/api/v1/device/android_tv/init",
+-                     {{"name", "UU远程 Switch 主控端"},
++                     {{"name", "YOUYOU Linux 主控端"},
+                       {"client_id", client_},
+                       {"system_id", client_},
+-                      {"system_version", "Horizon"},
++                      {"system_version", "Linux"},
+                       {"gaid", ""},
+                       {"install_id", client_},
+-                      {"build_fingerprint", "uuremote-ns"},
+-                      {"brand", "Nintendo"},
+-                      {"manufacturer", "Nintendo"},
+-                      {"model", "Switch"},
+-                      {"product", "uuremote-ns"},
++                      {"build_fingerprint", "youyou-linux"},
++                      {"brand", "Linux"},
++                      {"manufacturer", "Linux"},
++                      {"model", "Linux tablet"},
++                      {"product", "youyou-linux"},
+                       {"rom", ""},
+                       {"abi", "arm64-v8a"},
+                       {"resolution", "1280x720"},
+--- a/client.cpp
++++ b/client.cpp
+@@ -1561,9 +1561,6 @@
+                 std::to_string(available[1])+"-tls-"+std::to_string(available[2])).c_str());
+     const auto requested=configValue("turn_transport");
+     int mode=requested=="tls"?2:requested=="tcp"?1:requested=="udp"?0:reconnectAttempts_%3;
+-#ifndef __SWITCH__
+-    mode=0;
+-#endif
+     if(!available[mode]) {
+         mode=available[0]?0:available[1]?1:available[2]?2:0;
+         diagnostic("turn-transport-requested-mode-unavailable");
+@@ -1575,7 +1572,7 @@
+         if(server.type==rtc::IceServer::Type::Stun) {filtered.push_back(std::move(server));continue;}
+         if(relayIndex(server.relayType)!=mode) continue;
+         if(mode!=0) {
+-#ifdef __SWITCH__
++#if defined(__SWITCH__) || defined(__linux__)
+             if(turnBridges_.size()>=2) continue;
+             auto bridge=std::make_shared<TurnStreamBridge>(server.hostname,server.port?server.port:(mode==2?5349:3478),mode==2);
+             server.hostname="127.0.0.1";server.port=bridge->localPort();server.relayType=Relay::TurnUdp;
+@@ -1872,7 +1869,7 @@
+     else if (result == RemoteSignal::Description) {
+         diagnostic("soac-description-applied");
+         if (!sdpDumpDone_ && diagEnabled() && peer_) {
+-#ifndef UU_TWCC_OBSERVE_CLIENT
++#if !defined(UU_TWCC_OBSERVE_CLIENT) && !defined(__linux__)
+             if (auto description = peer_->remoteDescription()) {
+ #ifdef _WIN32
+                 _mkdir("diag");
+--- a/turn_stream.cpp
++++ b/turn_stream.cpp
+@@ -6,7 +6,7 @@
+ #include <stdexcept>
+ #include <thread>
+ #include <vector>
+-#ifdef __SWITCH__
++#if defined(__SWITCH__) || defined(__linux__)
+ #include <arpa/inet.h>
+ #include <cerrno>
+ #include <cstring>
+@@ -16,7 +16,7 @@
+ #include <curl/curl.h>
+ #endif
+ namespace uu {
+-#ifdef __SWITCH__
++#if defined(__SWITCH__) || defined(__linux__)
+ namespace {
+ using Buffer=std::vector<uint8_t>;
+ constexpr size_t maxQueued=256*1024;
+@@ -54,7 +54,11 @@
+         udp=socket(AF_INET,SOCK_DGRAM,0);
+         if(udp<0) throw std::runtime_error("TURN loopback socket unavailable");
+         try {
+-            sockaddr_in local{};local.sin_len=sizeof(local);local.sin_family=AF_INET;
++            sockaddr_in local{};
++#ifdef __SWITCH__
++            local.sin_len=sizeof(local);
++#endif
++            local.sin_family=AF_INET;
+             local.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+             if(bind(udp,reinterpret_cast<sockaddr *>(&local),sizeof(local))<0)
+                 throw std::runtime_error("TURN loopback bind failed");
+@@ -162,7 +166,7 @@
+ struct TurnStreamBridge::Impl {};
+ #endif
+ TurnStreamBridge::TurnStreamBridge(std::string host,uint16_t port,bool tls) {
+-#ifdef __SWITCH__
++#if defined(__SWITCH__) || defined(__linux__)
+     impl_=std::make_unique<Impl>(std::move(host),port,tls);
+ #else
+     (void)host;(void)port;(void)tls;throw std::runtime_error("TURN stream bridge is Switch-specific");
+@@ -170,14 +174,14 @@
+ }
+ TurnStreamBridge::~TurnStreamBridge()=default;
+ uint16_t TurnStreamBridge::localPort() const {
+-#ifdef __SWITCH__
++#if defined(__SWITCH__) || defined(__linux__)
+     return impl_->boundPort;
+ #else
+     return 0;
+ #endif
+ }
+ bool TurnStreamBridge::failed() const {
+-#ifdef __SWITCH__
++#if defined(__SWITCH__) || defined(__linux__)
+     return impl_->failure.load();
+ #else
+     return true;
+--- a/media.cpp
++++ b/media.cpp
+@@ -25,6 +25,7 @@
+ #include <direct.h>
+ #endif
+ #include <opus.h>
++#include <unistd.h>
+ extern "C" {
+ #include <libavcodec/avcodec.h>
+ #include <libavutil/hwcontext.h>
+@@ -374,6 +375,7 @@
+     // captured by the codec worker when it dequeues an AU.
+     std::atomic<uint64_t> recovery{0};
+     std::atomic<bool> keyframeRequested{true};
++    bool vaapiFailed = false; // Only read or written by the decoder worker.
+     std::atomic<bool> hardware{false};
+     std::atomic<int64_t> lastFrameMs{0};
+     std::atomic<int64_t> lastDecodedMs{0};
+@@ -577,7 +579,7 @@
+         if (info) {
+             info << "aus=" << d.auCount_ << "\n";
+             info << "dump_bytes=" << d.auDump_.size() << "\n";
+-            info << "decoder=" << (d.hardware ? "nvdec" : "software") << "\n";
++            info << "decoder=" << (d.hardware ? "vaapi" : "software") << "\n";
+             info << "codec=" << d.codecText << "\n";
+             info << "encoder=" << d.encoderText << "\n";
+             info << "width=" << d.width << "\n";
+@@ -612,6 +614,10 @@
+ #ifdef __SWITCH__
+         for (auto p = formats; *p != AV_PIX_FMT_NONE; ++p)
+             if (context->hw_device_ctx && *p == AV_PIX_FMT_NVTEGRA)
++                return *p;
++#elif defined(__linux__)
++        for (auto p = formats; *p != AV_PIX_FMT_NONE; ++p)
++            if (context->hw_device_ctx && *p == AV_PIX_FMT_VAAPI)
+                 return *p;
+ #else
+         (void)context;
+@@ -746,21 +752,38 @@
+                     return false;
+                 }
+ #else
+-                (void)hw;
++                if (hw) {
++                    // VAAPI frames stay on the GPU until publication. The SDL
++                    // frontend consumes NV12 in ordinary CPU-addressable memory.
++                    const char *renderNode = std::getenv("UU_VAAPI_DEVICE");
++                    if (!renderNode || !*renderNode) renderNode = "/dev/dri/renderD128";
++                    if (av_hwdevice_ctx_create(&ctx->hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI,
++                                               renderNode, nullptr, 0) < 0)
++                        return false;
++                    ctx->get_format = chooseFormat;
++                }
+ #endif
+                 if (avcodec_open2(ctx, codec, nullptr) < 0) {
+                     std::lock_guard lock(mutex);
+-                    error = hw ? "NVDEC 初始化失败，改用软件解码" : "无法初始化视频解码器";
++                    if (!hw) error = "无法初始化视频解码器";
+                     return false;
+                 }
+-                hardware = hw;
++                hardware = false; // Publish the decoder actually observed on an output frame.
+                 return true;
+             };
+ #ifdef __SWITCH__
+             if (prefersHardware(decoderPreference()))
+                 opened = open(true);
+ #else
+-            (void)prefersHardware;
++            const auto preference = lower(decoderPreference());
++            const char *node = std::getenv("UU_VAAPI_DEVICE");
++            if (!node || !*node) node = "/dev/dri/renderD128";
++            const bool probeVaapi = preference == "vaapi" || preference == "hardware" ||
++                                    (preference == "auto" && access(node, R_OK | W_OK) == 0);
++            if (!vaapiFailed && probeVaapi) {
++                opened = open(true);
++                if (!opened) vaapiFailed = true;
++            }
+ #endif
+             if (!opened)
+                 opened = open(false);
+@@ -856,6 +879,7 @@
+             // publishNs = from a successful receive return through frame
+             // handling, queue publication and av_frame_unref (RAII timer).
+             int64_t sendNs=0, recvNs=0, publishNs=0;
++            bool abandonVaapi = false;
+             auto drain = [&] {
+                 while (true) {
+                     const auto receiveStarted=std::chrono::steady_clock::now();
+@@ -876,6 +900,7 @@
+                         break;
+                     }
+                     if(disposition==ReceiveDisposition::Error) {
++                        abandonVaapi = ctx->hw_device_ctx != nullptr;
+                         const bool current=mediaPublishAllowed(currentGeneration,generation.load(),
+                                                                currentRecovery,recovery.load());
+                         if(current) {
+@@ -909,7 +934,8 @@
+ #ifdef __SWITCH__
+                             hardwareFrame=frame->format==AV_PIX_FMT_NVTEGRA;
+ #else
+-                            hardwareFrame=false;
++                            hardwareFrame = frame->format == AV_PIX_FMT_VAAPI;
++                            hardware.store(hardwareFrame.load());
+ #endif
+                         }
+                     }
+@@ -925,7 +951,11 @@
+                     }
+                     AVFrame *source = frame;
+ #ifdef __SWITCH__
+-                    if (frame->format == AV_PIX_FMT_NVTEGRA && !nativeOutput.load()) {
++                    const bool download = frame->format == AV_PIX_FMT_NVTEGRA && !nativeOutput.load();
++#else
++                    const bool download = frame->format == AV_PIX_FMT_VAAPI;
++#endif
++                    if (download) {
+                         av_frame_unref(cpu);
+                         {
+                             std::lock_guard lock(mutex);
+@@ -933,6 +963,7 @@
+                                                    currentRecovery,recovery.load())) ++cpuTransfers;
+                         }
+                         if (av_hwframe_transfer_data(cpu, frame, 0) < 0) {
++                            abandonVaapi = true;
+                             {
+                                 std::lock_guard lock(mutex);
+                                 if(mediaPublishAllowed(currentGeneration,generation.load(),
+@@ -944,9 +975,9 @@
+                             av_frame_unref(frame);
+                             continue;
+                         }
++                        av_frame_copy_props(cpu, frame);
+                         source = cpu;
+                     }
+-#endif
+                     if (source->width <= 0 || source->height <= 0 || source->width > 4096 ||
+                         source->height > 2160) {
+                         av_frame_unref(frame);
+@@ -1088,6 +1119,13 @@
+                     keyframeRequested = true;
+                 }
+             }
++            if (ctx->hw_device_ctx && (abandonVaapi || result < 0)) {
++                vaapiFailed = true;
++                av_frame_unref(frame);
++                av_frame_unref(cpu);
++                if (!openDecoder(ctx, activeCodec)) { decoderFailed = true; goto done; }
++                keyframeRequested = true;
++            }
+             const auto decodeMicros = std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::steady_clock::now() - decodeStart)
+                                           .count();
+@@ -1389,7 +1427,7 @@
+ }
+ std::string Media::status() {
+     std::lock_guard lock(impl_->mutex);
+-    std::string text = impl_->error.empty() ? (impl_->hardware ? "NVDEC 硬件解码" : "软件解码") : impl_->error;
++    std::string text = impl_->error.empty() ? (impl_->hardware ? "VA-API 硬件解码" : "软件解码") : impl_->error;
+     const int width = impl_->width.load(), height = impl_->height.load();
+     if (width > 0)
+         text += " · " + std::to_string(width) + "x" + std::to_string(height);
+@@ -1421,7 +1459,7 @@
+     out.skipDue=impl_->skipDue;out.skipBound=impl_->skipBound;out.selectedLateMs=impl_->selectedLateMs;
+     out.codec = impl_->codecText;
+     out.encoder = impl_->encoderText;
+-    out.decoder = impl_->hardware ? "NVDEC 硬解" : "软件解码（FFmpeg）";
++    out.decoder = impl_->hardware ? "VA-API 硬解" : "软件解码（FFmpeg）";
+     out.width = impl_->width.load();
+     out.height = impl_->height.load();
+     out.fps = impl_->fps.load();

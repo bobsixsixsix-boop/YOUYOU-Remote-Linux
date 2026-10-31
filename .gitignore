@@ -1,0 +1,17 @@
+/build/
+/target/
+/vendor/
+/account/target/
+/player/target/
+*.apk
+signing.key
+client-id
+client.lock
+session.json*
+connection.log
+ui-state.json*
+config.ini*
+*.deb
+diag/
+telemetry.ini
+__pycache__/

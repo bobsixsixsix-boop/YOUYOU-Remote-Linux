@@ -1,0 +1,11 @@
+[package]
+name = "youyou-account"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Local account state and private APK import for YOUYOU Linux"
+
+[dependencies]
+libc = "0.2"
+sha2 = "0.10"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=YOUYOU Remote
+Name[zh_CN]=YOUYOU 远程
+Comment=Control your Windows PC with UU Remote
+Comment[zh_CN]=通过 UU 远程连接 Windows 电脑
+Exec=youyou-linux
+Icon=youyou-linux
+Categories=Network;RemoteAccess;
+Terminal=false
+StartupNotify=true

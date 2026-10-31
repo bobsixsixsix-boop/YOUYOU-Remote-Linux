@@ -1,0 +1,360 @@
+--- a/include/client.hpp
++++ b/include/client.hpp
+@@ -32,9 +32,9 @@
+     std::string stage = "idle", detail = "按 A 扫码登录，或按 X 使用短信验证码", qrUrl, nickname;
+     Json devices = Json::array();
+     bool authenticated = false, streaming = false;
+-    int width = 1280, height = 720, fps = 30;
++    int width = 1280, height = 720, fps = 120;
+     int quality = 3, maxBitrateMbps = 0;
+-    bool vsync = true, hevc = false, qualityPending=false;
++    bool vsync = false, hevc = false, av1 = false, qualityPending=false;
+     std::string qualityNotice;
+     std::string videoScaleNotice;
+     int playoutDelayMs = 35;
+@@ -112,15 +112,15 @@
+             qrExpires_ = 0, qrNext_ = 0;
+     // Stream options sent to the computer (config.ini overridable for on-device
+     // experiments: width/height/fps/quality and keyframe request interval).
+-    int streamWidth_ = 1280, streamHeight_ = 720, streamFps_ = 30, streamQuality_ = 3;
++    int streamWidth_ = 1280, streamHeight_ = 720, streamFps_ = 120, streamQuality_ = 3;
+     int keyframeIntervalMs_ = 4000;
+     int maxBitrateMbps_ = 0;
+-    bool hevc_ = false;
++    bool hevc_ = false, av1_ = false;
+     bool rembAvailable_ = false, bitrateFeedbackSent_ = false;
+     unsigned rembTargetBps_ = 0;
+     int64_t lastBitrateAttempt_ = 0;
+     void applyBitrateCap();
+-    struct QualityValues {int width,height,fps,quality,cap,delay;bool vsync,hevc;};
++    struct QualityValues {int width,height,fps,quality,cap,delay;bool vsync,hevc,av1;};
+     enum class QualityRpcKind {QualityOnly,Capture,Fps,VideoQuality};
+     struct PendingQuality {QualityValues target;uint64_t id;int64_t deadline;bool acknowledged=false;bool headerOnly=false;int screenId=-1;QualityRpcKind kind=QualityRpcKind::QualityOnly;bool retried=false;};
+     std::optional<PendingQuality> pendingQuality_;
+--- a/include/config_store.hpp
++++ b/include/config_store.hpp
+@@ -14,7 +14,7 @@
+ // All managed keys are written once; unknown lines/comments and one fixed .bak
+ // are retained. Frame pacing keeps the first parsed value (including 0 #comment).
+ void saveQualityConfig(int width, int height, int fps, int quality, bool vsync,
+-                       int playoutDelay, int maxBitrateMbps, bool hevc);
++                       int playoutDelay, int maxBitrateMbps, bool hevc, bool av1 = false);
+ 
+ // Thread-safe read-only view of config.ini for all modules. Reload replaces the
+ // map atomically; readers never observe a partially parsed file.
+@@ -28,6 +28,7 @@
+     // First occurrence wins, matching the original per-module parsers.
+     std::string value(const std::string &key) const;
+     bool has(const std::string &key) const;
++    bool verticalSync() const { return integer("vsync",0,0,1)!=0; }
+     int integer(const std::string &key, int fallback, int minimum, int maximum) const;
+ 
+   private:
+--- a/config_store.cpp
++++ b/config_store.cpp
+@@ -33,7 +33,7 @@
+     "height=720\n"
+     "fps=60\n"
+     "quality=3\n"
+-    "vsync=1\n"
++    "vsync=0\n"
+     "frame_pacing=1\n"
+     "software_pacing=1\n"
+     "playout_delay_ms=8\n"
+@@ -280,11 +280,11 @@
+     }
+     if(text.empty()) return fallback;
+     if(key == "fps")
+-        return config::choice(text, fallback, {30, 60});
++        return config::choice(text, fallback, {30, 60, 120});
+     return config::integer(text, fallback, minimum, maximum);
+ }
+ void saveQualityConfig(int width, int height, int fps, int quality, bool vsync,
+-                       int playoutDelay, int maxBitrateMbps, bool hevc) {
++                       int playoutDelay, int maxBitrateMbps, bool hevc, bool av1) {
+ #ifdef __SWITCH__
+     const std::string path = "sdmc:/switch/UURemote-ns/config.ini";
+ #else
+@@ -310,7 +310,7 @@
+     output << "vsync=" << (vsync ? 1 : 0) << '\n';
+     output << "frame_pacing=" << framePacing << "\nplayout_delay_ms=" << playoutDelay << '\n';
+     output << "max_bitrate_mbps=" << maxBitrateMbps << '\n';
+-    output << "video_codec=" << (hevc?"hevc":"h264") << '\n';
++    output << "video_codec=" << (av1?"av1":hevc?"hevc":"h264") << '\n';
+     output.close();
+     if (!output) throw std::runtime_error("画质设置保存失败");
+     const auto backup = path + ".bak";
+--- a/protocol.cpp
++++ b/protocol.cpp
+@@ -1,4 +1,5 @@
+ #include "protocol.hpp"
++#include "capture_rate.hpp"
+ #include <cctype>
+ #include <chrono>
+ #include <mbedtls/base64.h>
+@@ -137,17 +138,17 @@
+ static void text(Bytes &b, int field, const std::string &s) {
+     message(b, field, Bytes(s.begin(), s.end()));
+ }
+-Bytes connectOptions(int w, int h, int fps, int quality, int customMbps, bool hevc) {
++Bytes connectOptions(int w, int h, int fps, int quality, int customMbps, bool hevc, bool av1Preferred) {
+     const bool supportedResolution=(w==960&&h==540)||(w==1280&&h==720)||(w==1920&&h==1080);
+     if (!supportedResolution)
+         throw std::invalid_argument("Unsupported capture resolution");
+     if (quality < 1 || quality > 6 || customMbps < 0 || customMbps > 100 ||
+         (quality == 6 && customMbps == 0) || (quality != 6 && customMbps != 0))
+         throw std::invalid_argument("Invalid custom capture bitrate");
+-    Bytes resolution, capture, decoder, out;
++    Bytes resolution, capture, out;
+     integer(resolution, 1, w);
+     integer(resolution, 2, h);
+-    integer(capture, 1, fps == 30 ? 1 : 2);
++    integer(capture, 1, captureRateTier(fps));
+     integer(capture, 2, quality);
+     integer(capture, 3, 1);
+     // Start in FOLLOW_REMOTE so the initial desktop is not switched to 720.
+@@ -166,17 +167,21 @@
+     integer(capture, 10, 0);
+     integer(capture, 11, fps);
+     if (quality == 6) integer(capture, 8, uint64_t(customMbps) * 1000000u);
+-    integer(decoder, 1, fps);
+-    // ConnectOptions field4 is a repeated DecoderCap, not a codec-neutral size.
+-    // Mobile CodecType: H264=1, H265=2. Keep this capability consistent with
+-    // the single codec offered in SDP, or host capability matching is invalid.
+-    integer(decoder, 2, hevc ? 2 : 1);
+-    integer(decoder, 3, w);
+-    integer(decoder, 4, h);
++    // DecoderCap is a repeated field. The released control protocol only
++    // defines H.264 (1) and H.265 (2); AV1 is negotiated through SDP.
++    auto addDecoder = [&](int codecType) {
++        Bytes decoder;
++        integer(decoder, 1, fps);
++        integer(decoder, 2, codecType);
++        integer(decoder, 3, w);
++        integer(decoder, 4, h);
++        message(out, 4, decoder);
++    };
+     integer(out, 1, 1);
+     integer(out, 2, uint64_t(-1));
+     message(out, 3, capture);
+-    message(out, 4, decoder);
++    addDecoder(hevc || av1Preferred ? 2 : 1);
++    if (av1Preferred) addDecoder(1);
+     integer(out, 8, 2);
+     return out;
+ }
+--- a/quality_rpc.cpp
++++ b/quality_rpc.cpp
+@@ -1,4 +1,5 @@
+ #include "quality_rpc.hpp"
++#include "capture_rate.hpp"
+ #include <limits>
+ #include <cstring>
+ #include <cmath>
+@@ -164,10 +165,10 @@
+ }
+ Bytes captureSettingsRpc(uint64_t id,int w,int h,int fps,int quality,int screenId,int customMbps){
+     if(!id || screenId<0 || !((w==960&&h==540)||(w==1280&&h==720)||(w==1920&&h==1080)) ||
+-       (fps!=30&&fps!=60) || quality<1 || quality>6 || customMbps<0 || customMbps>100 ||
++       !supportedCaptureRate(fps) || quality<1 || quality>6 || customMbps<0 || customMbps>100 ||
+        (quality==6 && customMbps==0) || (quality!=6 && customMbps!=0))throw std::invalid_argument("Invalid capture settings");
+     Bytes capture,header,rpc,out;
+-    integer(capture,1,fps==30?1:2);integer(capture,2,quality);integer(capture,3,1);
++    integer(capture,1,captureRateTier(fps));integer(capture,2,quality);integer(capture,3,1);
+     // Preserve the 0.3.25 capture pacing fields; these keep the host frame
+     // cadence regular and avoid batching in the decoder queue.
+     integer(capture,12,0);
+@@ -184,11 +185,11 @@
+ }
+ 
+ Bytes qualityUpdateRpc(uint64_t id,int fps,int quality,int screenId,int customMbps){
+-    if(!id || screenId<0 || (fps!=30&&fps!=60) || quality<1 || quality>6 ||
++    if(!id || screenId<0 || !supportedCaptureRate(fps) || quality<1 || quality>6 ||
+        customMbps<0 || customMbps>100 || (quality==6&&customMbps==0) ||
+        (quality!=6&&customMbps!=0))throw std::invalid_argument("Invalid quality update");
+     Bytes capture,header,rpc,out;
+-    integer(capture,1,fps==30?1:2);integer(capture,2,quality);integer(capture,3,1);
++    integer(capture,1,captureRateTier(fps));integer(capture,2,quality);integer(capture,3,1);
+     integer(capture,12,0);
+     integer(capture,18,uint64_t(fps));
+     integer(capture,4,unsigned(screenId));
+@@ -205,12 +206,12 @@
+     const bool outputSupported=(outputWidth==960&&outputHeight==540) ||
+         (outputWidth==1280&&outputHeight==720) || (outputWidth==1920&&outputHeight==1080);
+     if(!id || sourceWidth<1 || sourceHeight<1 || sourceWidth>16384 || sourceHeight>16384 ||
+-       !outputSupported || screenId<0 || (fps!=30&&fps!=60) || quality<1 || quality>6 ||
++       !outputSupported || screenId<0 || !supportedCaptureRate(fps) || quality<1 || quality>6 ||
+        customMbps<0 || customMbps>100 || (quality==6&&customMbps==0) ||
+        (quality!=6&&customMbps!=0))
+         throw std::invalid_argument("Invalid video scale request");
+     Bytes capture,header,rpc,out;
+-    integer(capture,1,fps==30?1:2);integer(capture,2,quality);integer(capture,3,1);
++    integer(capture,1,captureRateTier(fps));integer(capture,2,quality);integer(capture,3,1);
+     integer(capture,12,0);
+     integer(capture,18,uint64_t(fps));
+     integer(capture,4,unsigned(screenId));
+@@ -293,7 +294,7 @@
+         while(body.next(v)){
+             if(v.wire!=0)continue;
+             switch(v.key){
+-                case 1: if(v.value>2)return {}; result.fps=int(v.value);result.fields|=1u;break;
++                case 1: if(v.value>4)return {}; result.fps=int(v.value);result.fields|=1u;break;
+                 case 2: if(v.value>6)return {}; result.quality=int(v.value);result.fields|=2u;break;
+                 case 3: if(v.value>4)return {}; result.chroma=int(v.value);break;
+                 case 4: if(v.value>uint64_t(std::numeric_limits<int64_t>::max()))return {}; result.maxCustomBitrate=int64_t(v.value);result.fields|=16u;break;
+--- a/client.cpp
++++ b/client.cpp
+@@ -2,6 +2,7 @@
+ #include "client.hpp"
+ #include "config_store.hpp"
+ #include "quality_rpc.hpp"
++#include "capture_rate.hpp"
+ #include "diagnostics.hpp"
+ #include "event_queue.hpp"
+ #include "turn_stream.hpp"
+@@ -483,21 +484,24 @@
+                     std::to_string(streamHeight_)).c_str());
+         streamWidth_=1280;streamHeight_=720;
+     }
+-    streamFps_ = configInt("fps", 60, 30, 60);
++    streamFps_ = configInt("fps", 120, 30, 120);
+     streamQuality_ = configInt("quality", 3, 1, 6);
+     maxBitrateMbps_=configInt("max_bitrate_mbps",0,0,100);
+     if(streamQuality_==6 && maxBitrateMbps_==0)streamQuality_=4;
+     state_.maxBitrateMbps=maxBitrateMbps_;
+-    hevc_=configValue("video_codec")=="hevc";state_.hevc=hevc_;
++    const auto videoCodec=configValue("video_codec");
++    av1_=videoCodec.empty() || videoCodec=="av1";
++    hevc_=videoCodec=="hevc";state_.hevc=hevc_;state_.av1=av1_;
+     keyframeIntervalMs_ = configInt("keyframe_interval_ms", 4000, 0, 60000);
+     rtxEnabled_ = configInt("rtx", 1, 0, 1) != 0;
+     state_.width = streamWidth_; state_.height = streamHeight_; state_.fps = streamFps_; state_.quality = streamQuality_;
+-    state_.vsync = configInt("vsync",1,0,1) != 0;
++    state_.vsync = ConfigStore::instance().verticalSync();
+     state_.playoutDelayMs = configInt("playout_delay_ms",8,0,100);
+     // Media reads config.ini independently. Apply the 8 ms fallback only when
+     // the key is absent and pacing is enabled; setPlayoutDelay only updates the
+     // delay and frame_pacing owns whether pacing is enabled.
+     if(configValue("playout_delay_ms").empty() && configInt("frame_pacing",1,0,1)!=0)
++        media_->setTargetFps(streamFps_);
+         media_->setPlayoutDelay(state_.playoutDelayMs);
+     autoReconnect_=configInt("auto_reconnect",1,0,1)!=0;
+     reconnectLimit_=configInt("reconnect_attempts",5,1,10);
+@@ -724,7 +728,7 @@
+         const bool hasFps=bool(syncFields&1u),hasQuality=bool(syncFields&2u);
+         const bool hasWidth=bool(syncFields&4u),hasHeight=bool(syncFields&8u);
+         const bool hasBitrate=bool(syncFields&16u);
+-        const int syncFps=data.value("fps",0)==1?30:(data.value("fps",0)==2?60:0);
++        const int syncFps=fpsFromTier(data.value("fps",0));
+         const int syncQuality=data.value("quality",0);
+         const int syncWidth=data.value("width",0),syncHeight=data.value("height",0);
+         const int64_t syncBitrate=data.value("bitrate",int64_t(0));
+@@ -739,7 +743,10 @@
+         const QualityApplicationTarget target{targetWidth,targetHeight,targetFps,targetQuality,targetCap};
+         // Evidence is accumulated for the lifetime of the current request.
+         // Split sync messages can therefore jointly prove a complete match.
+-        if(hasFps)qualityApply_.evidence.observeFps(syncFps);
++        // Sync echoes the legacy tier, not fpsCount. A returned 144 tier alone
++        // cannot confirm that a 120 fps custom request was applied.
++        if(hasFps && syncFps && !(targetFps==120 && syncFps==144))
++            qualityApply_.evidence.observeFps(syncFps);
+         if(hasQuality)qualityApply_.evidence.observeQuality(syncQuality);
+         if(hasWidth)qualityApply_.evidence.observeWidth(syncWidth);
+         if(hasHeight)qualityApply_.evidence.observeHeight(syncHeight);
+@@ -800,27 +807,28 @@
+         const int width = data.at("width").get<int>(), height = data.at("height").get<int>();
+         const int fps = data.at("fps").get<int>(), quality = data.at("quality").get<int>();
+         if (!((width == 960 && height == 540) || (width == 1280 && height == 720) ||
+-              (width == 1920 && height == 1080)) || (fps != 30 && fps != 60) || quality < 1 || quality > 6)
++              (width == 1920 && height == 1080)) || !supportedCaptureRate(fps) || quality < 1 || quality > 6)
+             throw std::runtime_error("画质设置无效");
+-        const bool vsync = data.value("vsync",true);
++        const bool vsync = data.value("vsync",state_.vsync);
+         const int playoutDelay=data.value("playout_delay_ms",state_.playoutDelayMs);
+         if(playoutDelay<0 || playoutDelay>100) throw std::runtime_error("播放缓冲设置无效");
+         const int maxBitrate=data.value("max_bitrate_mbps",maxBitrateMbps_);
+         if(maxBitrate<0 || maxBitrate>100 || (quality==6 && maxBitrate==0)) throw std::runtime_error("自定义码率设置无效");
+-        const bool hevc=data.value("hevc",hevc_);
++        const bool av1=data.value("av1", data.contains("hevc") ? false : av1_);
++        const bool hevc=!av1 && data.value("hevc",hevc_);
+         if(pendingQuality_){std::lock_guard lock(stateMutex_);state_.qualityNotice="正在更新画质，请稍候";return;}
+-        const QualityValues target{width,height,fps,quality,maxBitrate,playoutDelay,vsync,hevc};
++        const QualityValues target{width,height,fps,quality,maxBitrate,playoutDelay,vsync,hevc,av1};
+         const bool resolutionChanged=width!=streamWidth_ || height!=streamHeight_;
+         const bool captureChanged=width!=streamWidth_ || height!=streamHeight_ || fps!=streamFps_ || quality!=streamQuality_ ||
+             ((quality==6 || streamQuality_==6) && maxBitrate!=maxBitrateMbps_);
+         const bool capChanged=maxBitrate!=maxBitrateMbps_;
+-        const bool streamChanged=captureChanged || capChanged || hevc!=hevc_;
++        const bool streamChanged=captureChanged || capChanged || hevc!=hevc_ || av1!=av1_;
+         if(!peer_ || (!snapshot().streaming && !streamChanged)){commitQuality(target,false,"设置已保存，连接时应用");return;}
+         if(!snapshot().streaming){reconnectQuality(target,"正在重新连接以应用设置…");return;}
+         // Custom encoder limits are not a measurement of available bandwidth.
+         // Rebuild the track when crossing modes so a prior stored REMB
+         // cannot keep being repeated by the RTCP receiving session.
+-        if(hevc!=hevc_ || ((quality==6)!=(streamQuality_==6)) ||
++        if(hevc!=hevc_ || av1!=av1_ || ((quality==6)!=(streamQuality_==6)) ||
+            (quality!=6 && ((capChanged && maxBitrate==0) || (capChanged && !rembAvailable_)))){
+             reconnectQuality(target,"正在重新连接以应用编码或码率设置…");return;
+         }
+@@ -855,7 +863,7 @@
+         Bytes bytes;
+         std::string rpcMode;
+         QualityRpcKind rpcKind=QualityRpcKind::QualityOnly;
+-        if(qualityOnly && fpsChanged && !qualityChanged && !customBitrateChanged && fpsSettingSupported_){
++        if(qualityOnly && fps!=120 && fpsChanged && !qualityChanged && !customBitrateChanged && fpsSettingSupported_){
+             // Protocol-native FpsSettingRequest: frame rate only. This is safe
+             // for custom-bitrate (q6) sessions because it carries no bitrate or
+             // resolution field.
+@@ -1426,7 +1434,7 @@
+             if ((!remote_.is_string() && !remote_.is_number()) || remote_ == "")
+                 throw std::runtime_error("房间内没有在线电脑");
+             control_ = uuid();
+-            auto options = connectOptions(streamWidth_, streamHeight_, streamFps_, streamQuality_,streamQuality_==6?maxBitrateMbps_:0,hevc_);
++            auto options = connectOptions(streamWidth_, streamHeight_, streamFps_, streamQuality_,streamQuality_==6?maxBitrateMbps_:0,hevc_,av1_);
+             diagnostic(("encoder-bitrate-request-connect-bps-"+
+                         std::to_string(streamQuality_==6?uint64_t(maxBitrateMbps_)*1000000u:0)+
+                         "-quality-"+std::to_string(streamQuality_)).c_str());
+@@ -1436,7 +1444,7 @@
+                         std::to_string(streamQuality_) + "-cap" +
+                         (streamQuality_==6?std::to_string(maxBitrateMbps_):std::string("auto")) +
+                         "-kf" + std::to_string(keyframeIntervalMs_) +
+-                        (hevc_?"-decoder-cap-h265":"-decoder-cap-h264"))
++                        (av1_?"-decoder-cap-h265-offer-av1":hevc_?"-decoder-cap-h265":"-decoder-cap-h264"))
+                            .c_str());
+             setState("negotiating", "正在申请远控权限…");
+             // Preserve room ICE configuration if control does not repeat it.
+@@ -2132,11 +2140,12 @@
+ void Client::commitQuality(const QualityValues &q,bool hotCap,const char *notice) {
+     if(hotCap && q.quality!=6 && (!video_ || !rembAvailable_ || q.cap<=0 || !video_->requestBitrate(unsigned(q.cap)*1000000u)))
+         throw std::runtime_error("码率反馈更新失败");
+-    saveQualityConfig(q.width,q.height,q.fps,q.quality,q.vsync,q.delay,q.cap,q.hevc);
++    saveQualityConfig(q.width,q.height,q.fps,q.quality,q.vsync,q.delay,q.cap,q.hevc,q.av1);
++    media_->setTargetFps(q.fps);
+     media_->setPlayoutDelay(q.delay);
+     const bool sizeChanged=q.width!=streamWidth_ || q.height!=streamHeight_;
+     streamWidth_=q.width;streamHeight_=q.height;streamFps_=q.fps;streamQuality_=q.quality;
+-    maxBitrateMbps_=q.cap;hevc_=q.hevc;
++    maxBitrateMbps_=q.cap;hevc_=q.hevc;av1_=q.av1;
+     if(sizeChanged){
+         pendingVideoScale_.reset();videoScaleAttempted_=false;videoScaleVerified_=false;nextVideoScaleCheck_=0;
+         setVideoScaleNotice("视频尺寸设置已变化，等待重新缩放");
+@@ -2157,7 +2166,7 @@
+     }
+     {std::lock_guard lock(stateMutex_);
+         state_.width=q.width;state_.height=q.height;state_.fps=q.fps;state_.quality=q.quality;
+-        state_.maxBitrateMbps=q.cap;state_.playoutDelayMs=q.delay;state_.vsync=q.vsync;state_.hevc=q.hevc;
++        state_.maxBitrateMbps=q.cap;state_.playoutDelayMs=q.delay;state_.vsync=q.vsync;state_.hevc=q.hevc;state_.av1=q.av1;
+         state_.qualityPending=false;state_.qualityNotice=notice;
+     }
+     qualityNoticeUntil_=monotonicMs()+8000;
+--- a/include/protocol.hpp
++++ b/include/protocol.hpp
+@@ -17,7 +17,7 @@
+                        const std::string &body, const std::string &client, const std::string &device,
+                        const std::string &user, int64_t timestamp);
+ Bytes connectOptions(int width = 1280, int height = 720, int fps = 30, int quality = 3, int customMbps = 0,
+-                     bool hevc = false);
++                     bool hevc = false, bool av1Preferred = false);
+ Bytes launchApp(uint64_t seq, const Json &app);
+ Json ackValue(const Json &args, const std::string &event);
+ Json soac(const Json &client, const std::string &type, const Json &payload, const Json &ice,
