@@ -1561,9 +1561,6 @@ void Client::beginPeer(const Json &result) {
                 std::to_string(available[1])+"-tls-"+std::to_string(available[2])).c_str());
     const auto requested=configValue("turn_transport");
     int mode=requested=="tls"?2:requested=="tcp"?1:requested=="udp"?0:reconnectAttempts_%3;
-#ifndef __SWITCH__
-    mode=0;
-#endif
     if(!available[mode]) {
         mode=available[0]?0:available[1]?1:available[2]?2:0;
         diagnostic("turn-transport-requested-mode-unavailable");
@@ -1575,7 +1572,7 @@ void Client::beginPeer(const Json &result) {
         if(server.type==rtc::IceServer::Type::Stun) {filtered.push_back(std::move(server));continue;}
         if(relayIndex(server.relayType)!=mode) continue;
         if(mode!=0) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__linux__)
             if(turnBridges_.size()>=2) continue;
             auto bridge=std::make_shared<TurnStreamBridge>(server.hostname,server.port?server.port:(mode==2?5349:3478),mode==2);
             server.hostname="127.0.0.1";server.port=bridge->localPort();server.relayType=Relay::TurnUdp;
@@ -1872,7 +1869,7 @@ void Client::handleSoac(const Json &packet) {
     else if (result == RemoteSignal::Description) {
         diagnostic("soac-description-applied");
         if (!sdpDumpDone_ && diagEnabled() && peer_) {
-#ifndef UU_TWCC_OBSERVE_CLIENT
+#if !defined(UU_TWCC_OBSERVE_CLIENT) && !defined(__linux__)
             if (auto description = peer_->remoteDescription()) {
 #ifdef _WIN32
                 _mkdir("diag");
@@ -1921,8 +1918,11 @@ void Client::input(const Json &data) {
         if(type!=2)diagnostic(type==1?"native-touch-start":type==3?"native-touch-end":"native-touch-cancel");
         return;
     }
+    // Keep the position paired with a touch mouse button transition; otherwise
+    // congestion could drop the move and click the previous desktop location.
+    const std::string owner=data.value("source",std::string("controls"));
     if (it->second->bufferedAmount() > 64 * 1024 &&
-        (action == "mouse_move_absolute" || action == "mouse_scroll"))
+        ((action == "mouse_move_absolute" && owner != "touch_button_position") || action == "mouse_scroll"))
         return;
     // The UI may request a pad before SCTP opens. Retry on the worker when
     // an actual update can be submitted; never send updates before setup.
@@ -1931,7 +1931,6 @@ void Client::input(const Json &data) {
         if(!gamepadConnected_)return;
     }
     const bool mouseButton=action=="mouse_press" || action=="mouse_release";
-    const std::string owner=data.value("source",std::string("controls"));
     int button=0;
     if(mouseButton){
         button=data.at("button").get<int>();

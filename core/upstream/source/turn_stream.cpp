@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__linux__)
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
@@ -16,7 +16,7 @@
 #include <curl/curl.h>
 #endif
 namespace uu {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__linux__)
 namespace {
 using Buffer=std::vector<uint8_t>;
 constexpr size_t maxQueued=256*1024;
@@ -54,7 +54,11 @@ struct TurnStreamBridge::Impl {
         udp=socket(AF_INET,SOCK_DGRAM,0);
         if(udp<0) throw std::runtime_error("TURN loopback socket unavailable");
         try {
-            sockaddr_in local{};local.sin_len=sizeof(local);local.sin_family=AF_INET;
+            sockaddr_in local{};
+#ifdef __SWITCH__
+            local.sin_len=sizeof(local);
+#endif
+            local.sin_family=AF_INET;
             local.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
             if(bind(udp,reinterpret_cast<sockaddr *>(&local),sizeof(local))<0)
                 throw std::runtime_error("TURN loopback bind failed");
@@ -162,7 +166,7 @@ struct TurnStreamBridge::Impl {
 struct TurnStreamBridge::Impl {};
 #endif
 TurnStreamBridge::TurnStreamBridge(std::string host,uint16_t port,bool tls) {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__linux__)
     impl_=std::make_unique<Impl>(std::move(host),port,tls);
 #else
     (void)host;(void)port;(void)tls;throw std::runtime_error("TURN stream bridge is Switch-specific");
@@ -170,14 +174,14 @@ TurnStreamBridge::TurnStreamBridge(std::string host,uint16_t port,bool tls) {
 }
 TurnStreamBridge::~TurnStreamBridge()=default;
 uint16_t TurnStreamBridge::localPort() const {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__linux__)
     return impl_->boundPort;
 #else
     return 0;
 #endif
 }
 bool TurnStreamBridge::failed() const {
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__linux__)
     return impl_->failure.load();
 #else
     return true;

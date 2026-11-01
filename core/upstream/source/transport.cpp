@@ -93,6 +93,14 @@ Json Api::request(const std::string &method, const std::string &path, const Json
     auto json = Json::parse(response, nullptr, false);
     if (json.is_discarded() || !json.is_object())
         throw std::runtime_error("UU returned an invalid response (HTTP " + std::to_string(status) + ")");
+    // The device list endpoint can report an expired bearer as HTTP 422
+    // with service code 1120. Clear only that explicit authentication failure.
+    const auto errorCode = json.find("code");
+    if (status == 422 && !token_.empty() && errorCode != json.end() &&
+        errorCode->is_number_integer() && *errorCode == 1120) {
+        logout();
+        throw std::runtime_error("登录已失效，请重新登录");
+    }
     if (status < 200 || status >= 300 || json.value("code", -1) != 0)
         throw std::runtime_error(json.value("msg", std::string("UU request failed")));
     return json.value("data", Json{});
@@ -101,17 +109,17 @@ void Api::initialize() {
     if (!device_.empty())
         return;
     auto d = request("POST", "/api/v1/device/android_tv/init",
-                     {{"name", "UU远程 Switch 主控端"},
+                     {{"name", "YOUYOU Linux 主控端"},
                       {"client_id", client_},
                       {"system_id", client_},
-                      {"system_version", "Horizon"},
+                      {"system_version", "Linux"},
                       {"gaid", ""},
                       {"install_id", client_},
-                      {"build_fingerprint", "uuremote-ns"},
-                      {"brand", "Nintendo"},
-                      {"manufacturer", "Nintendo"},
-                      {"model", "Switch"},
-                      {"product", "uuremote-ns"},
+                      {"build_fingerprint", "youyou-linux"},
+                      {"brand", "Linux"},
+                      {"manufacturer", "Linux"},
+                      {"model", "Linux tablet"},
+                      {"product", "youyou-linux"},
                       {"rom", ""},
                       {"abi", "arm64-v8a"},
                       {"resolution", "1280x720"},
