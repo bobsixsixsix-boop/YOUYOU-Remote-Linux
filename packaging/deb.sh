@@ -18,6 +18,8 @@ doc="$stage/usr/share/doc/youyou-linux"
 install -Dm755 "$bin" "$stage/usr/bin/youyou-linux"
 install -Dm644 "$core" "$stage/usr/lib/youyou-linux/libyouyou_core.so"
 sh packaging/install-assets.sh "$upstream" "$share"
+install -Dm755 integrations/y700-edge/enable.py "$stage/usr/bin/youyou-enable-y700-gestures"
+install -Dm644 integrations/y700-edge/stream-edges.js "$share/y700-edge/stream-edges.js"
 install -Dm644 packaging/youyou-linux.desktop "$stage/usr/share/applications/youyou-linux.desktop"
 install -Dm644 assets/youyou-linux.png "$stage/usr/share/icons/hicolor/256x256/apps/youyou-linux.png"
 install -Dm644 README.md "$doc/README.md"
@@ -31,7 +33,7 @@ Architecture: $arch
 Section: net
 Priority: optional
 Maintainer: YOUYOU Linux port <noreply@localhost>
-Depends: libc6 (>= 2.43), libstdc++6, libsdl2-2.0-0, libsdl2-ttf-2.0-0, libavcodec62, libavutil60, libswscale9, libopus0, libcurl4t64, ca-certificates, curl
+Depends: libc6 (>= 2.43), libstdc++6, libsdl2-2.0-0, libsdl2-ttf-2.0-0, libavcodec62, libavutil60, libswscale9, libopus0, libcurl4t64, ca-certificates, curl, python3
 Recommends: kdialog
 Description: Unofficial UU Remote client for Linux
  Rust tablet input and playback with the YOUYOU Remote interface, for Ubuntu 26.04.

@@ -93,9 +93,9 @@ impl Candidate {
         let age = now.wrapping_sub(first.time);
         // A stationary press belongs to the host. Allow more time for a swipe
         // already moving inward, but return a stalled drag to the host as well.
-        age >= 650
-            || (age >= 200 && self.distance(last).0 < 8.0)
-            || now.wrapping_sub(last.time) >= 250
+        age >= 1000
+            || (age >= 200 && self.distance(last).0 < 5.0)
+            || now.wrapping_sub(last.time) >= 350
     }
 }
 
@@ -157,10 +157,10 @@ impl EdgeSwipe {
                 || candidate.window != window
                 || candidate.expired(t.time)
                 || inward < -8.0
-                || (vertical >= 12.0 && vertical > inward * 0.75);
+                || (vertical >= 20.0 && vertical > inward * 1.4);
             if !incompatible {
-                let threshold = (window.0 as f32 * 0.2).min(64.0);
-                if inward >= threshold && inward >= vertical * 1.5 {
+                let threshold = (window.0 as f32 * 0.2).min(44.0);
+                if inward >= threshold && inward >= vertical * 1.1 {
                     self.pending = None;
                     self.swallowed = (t.phase != Phase::Up).then_some(t.id);
                     return Route::OpenMenu;
@@ -173,7 +173,9 @@ impl EdgeSwipe {
             return Route::Replay(self.pending.take().unwrap().samples);
         }
         if first_contact && t.phase == Phase::Down && window.0 > 0 && window.1 > 0 {
-            let edge = (window.0 as f32 * 0.06).min(40.0);
+            // Accept the bezel itself as well as a thumb landing slightly inside.
+            // Keep the band proportional on narrow windows so content stays direct.
+            let edge = (window.0 as f32 * 0.08).min(96.0);
             let x = t.point.0 * window.0 as f32;
             if (0.0..=edge).contains(&x) || (0.0..=edge).contains(&(window.0 as f32 - x)) {
                 self.pending = Some(Candidate {
@@ -246,6 +248,46 @@ mod tests {
     }
 
     #[test]
+    fn bezel_or_thumb_width_in_accepts_a_short_diagonal_swipe() {
+        for (start, end) in [(0, 46), (88, 134), (1192, 1146), (1280, 1234)] {
+            let mut edge = EdgeSwipe::default();
+            assert!(matches!(
+                edge.route(sample(1, Down, start, 350, 10), WINDOW, true),
+                Route::Hold
+            ));
+            assert!(matches!(
+                edge.route(sample(1, Motion, end, 388, 80), WINDOW, true),
+                Route::OpenMenu
+            ));
+        }
+        let mut edge = EdgeSwipe::default();
+        assert!(matches!(
+            edge.route(sample(1, Down, 105, 350, 40), WINDOW, true),
+            Route::Pass
+        ));
+    }
+
+    #[test]
+    fn an_inward_swipe_can_move_slowly_without_turning_into_a_long_press() {
+        let mut edge = EdgeSwipe::default();
+        for (phase, x, t) in [
+            (Down, 80, 10),
+            (Motion, 88, 170),
+            (Motion, 99, 475),
+            (Motion, 112, 750),
+        ] {
+            assert!(matches!(
+                edge.route(sample(1, phase, x, 330, t), WINDOW, true),
+                Route::Hold
+            ));
+        }
+        assert!(matches!(
+            edge.route(sample(1, Up, 127, 333, 900), WINDOW, true),
+            Route::OpenMenu
+        ));
+    }
+
+    #[test]
     fn stationary_press_times_out_but_moving_swipe_can_pass_200_ms() {
         let mut edge = EdgeSwipe::default();
         edge.route(sample(1, Down, 22, 300, 10), WINDOW, true);
@@ -311,7 +353,7 @@ mod tests {
         edge.route(sample(1, Up, 500, 300, 15), WINDOW, true);
         edge.route(sample(1, Down, 20, 250, 20), WINDOW, true);
         assert!(matches!(
-            edge.route(sample(1, Motion, 23, 267, 40), WINDOW, true),
+            edge.route(sample(1, Motion, 23, 273, 40), WINDOW, true),
             Route::Replay(_)
         ));
         assert!(matches!(

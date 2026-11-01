@@ -43,6 +43,14 @@ pub struct PlayerStatus {
     pub authenticated: bool,
 }
 
+impl PlayerStatus {
+    fn window_title(&self) -> String {
+        // The Y700 edge script checks this state before the session's free-form detail.
+        let page = if self.streaming { "串流中" } else { "设备" };
+        format!("YOUYOU · {page} | {}   |   F8 菜单 · F11 全屏", self.title)
+    }
+}
+
 pub trait Session {
     fn menu(&mut self, _: &WindowCanvas) -> Result<Option<Box<dyn Menu>>, String> {
         Ok(None)
@@ -274,7 +282,7 @@ fn play_loop(
                     }
                 }
                 streaming = status.streaming;
-                let new = format!("YOUYOU · {}   |   F8 菜单 · F11 全屏", status.title);
+                let new = status.window_title();
                 if new != title {
                     canvas
                         .window_mut()
@@ -691,6 +699,9 @@ fn play_loop(
         }
         Ok(exit)
     })();
+    if streaming {
+        let _ = canvas.window_mut().set_title("YOUYOU 远程");
+    }
     for data in keys.release() {
         let _ = session.input(data);
     }
@@ -879,6 +890,20 @@ pub fn self_test() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn window_title_identifies_only_the_live_session() {
+        let mut status = PlayerStatus {
+            title: "YOUYOU · 串流中 | 来自会话的状态".into(),
+            streaming: false,
+            can_control: true,
+            authenticated: true,
+        };
+        assert!(!status.window_title().starts_with("YOUYOU · 串流中 | "));
+        status.streaming = true;
+        status.can_control = false;
+        assert!(status.window_title().starts_with("YOUYOU · 串流中 | "));
+    }
+
     #[test]
     fn native_y700_landscape_and_portrait_letterbox() {
         assert_eq!(fit((3040, 1904), (1280, 720)), Rect::new(0, 97, 3040, 1710));
