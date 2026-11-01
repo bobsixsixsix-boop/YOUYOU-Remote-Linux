@@ -486,7 +486,8 @@ impl Ui {
             let mut line = String::new();
             for c in part.chars() {
                 line.push(c);
-                if line.chars().count() > 1 && self.measure(&line, size, false) > width {
+                // Closing punctuation hangs past the edge rather than starting a line.
+                if line.chars().count() > 1 && !"，。、；：！？）」』”".contains(c) && self.measure(&line, size, false) > width {
                     line.pop();
                     lines.push(std::mem::replace(&mut line, c.to_string()));
                 }

@@ -84,17 +84,12 @@ pub fn drawer(ui: &mut Ui, open: bool, side: f32, alias: &str, s: &Value, touch_
 
     ui.text("电脑屏幕", x, y + 10.0, 17.0, true, INK, 0.0);
     y += 32.0;
-    let p = &s["privacy"];
-    let labels = ["正常显示".to_string(), "隐私屏保".to_string(), "关闭显示屏".to_string()];
-    let mode = if p["pending"] == true { &p["requested"] } else { &p["mode"] };
-    let chosen = mode.as_u64().filter(|m| (1..=3).contains(m) && (p["known"] == true || p["pending"] == true));
-    let (pick, used) = ui.chips("menu/privacy", x, y, cw, &labels, chosen.map(|m| m as usize - 1));
-    if let Some(i) = pick {
-        action = Some(Action::Privacy(i as u32 + 1));
+    // GameViewer answers 508 to modes 2 and 3 while its virtual display is up (tools/results/20261102-input.txt).
+    if d["virtual"] == true {
+        ui.paragraph("专用桌面下电脑不接受隐私屏保和关闭显示屏，要用请在设置里关掉专用桌面再连接。", x, y + 8.0, cw, 14.0, MUTED, 0.0);
+    } else {
+        privacy(ui, x, y, cw, &s["privacy"], &mut action);
     }
-    y += used;
-    let notice = p["notice"].as_str().unwrap_or("");
-    ui.paragraph(notice, x, y + 8.0, cw, 14.0, MUTED, 0.0);
 
     let half = (cw - 12.0) / 2.0;
     let bottom = h - PAD - 56.0;
@@ -105,6 +100,18 @@ pub fn drawer(ui: &mut Ui, open: bool, side: f32, alias: &str, s: &Value, touch_
         action = Some(Action::Disconnect);
     }
     (t, action.filter(|_| open))
+}
+
+/// The three privacy chips and the host's last answer under them.
+fn privacy(ui: &mut Ui, x: f32, y: f32, cw: f32, p: &Value, action: &mut Option<Action>) {
+    let labels = ["正常显示".to_string(), "隐私屏保".to_string(), "关闭显示屏".to_string()];
+    let mode = if p["pending"] == true { &p["requested"] } else { &p["mode"] };
+    let chosen = mode.as_u64().filter(|m| (1..=3).contains(m) && (p["known"] == true || p["pending"] == true));
+    let (pick, used) = ui.chips("menu/privacy", x, y, cw, &labels, chosen.map(|m| m as usize - 1));
+    if let Some(i) = pick {
+        *action = Some(Action::Privacy(i as u32 + 1));
+    }
+    ui.paragraph(p["notice"].as_str().unwrap_or(""), x, y + used + 8.0, cw, 14.0, MUTED, 0.0);
 }
 
 /// The panel shown while connecting or reconnecting; true when cancelled.

@@ -1,0 +1,28 @@
+Pad, F8 and privacy screen against the real host: Y700 -> SEIHAKUNOPC (GameViewer 4.45), 2026-11-02.
+Tablet: tools/vpad.py (uinput clone of a wired Xbox 360 pad as xpad creates it, plus a
+keyboard), taps through y700's vtouch. PC: tools/input-watch.py logging XInput and the
+console display state. Raw: runs/input-1 (dedicated desktop), runs/input-2 (physical screen).
+
+Pad -> PC (XInput pad 0 appears with the first input, nothing to install on the PC):
+  A, Y, Back, d-pad right/up      arrive as the same XInput buttons
+  left stick x +20000             l (20000, 0)
+  left stick up (evdev y -32768)  l (0, 32767)   Y up is positive, as XInput wants
+  right trigger 255               rt 255
+Menu:
+  Back held + Start               drawer opens. Back alone reaches the PC first (a real button),
+                                  released as the drawer opens; Start never does
+  B in the drawer                 closes it, nothing reaches the PC
+  F8 / F8                         opens / closes (keyboard focus on the stream window)
+Privacy screen (connection.log privacy-screen-response-code-*):
+  dedicated desktop  mode 3 -> code 508, current 1; mode 2 -> code 508, current 1
+                     (same 508 for mode 2 in two earlier sessions in connection.log.1)
+  physical screen    mode 2 -> 0, current 2; mode 3 -> 0, current 3 ("电脑报告显示屏已关闭");
+                     back to 1 -> 0, current 1. The stream kept running throughout.
+  Windows' console display state stayed "on" in mode 3: GameViewer does not blank through
+  the power API, so only the host's own answer (and someone at the PC) can confirm it.
+
+Changes from this: the drawer hides the privacy chips on a dedicated desktop and says why
+(GameViewer refuses with 508 while its virtual display is up); paragraph wrapping hangs
+closing punctuation instead of starting a line with it.
+
+Not covered: a real G9 pad (rumble, its own mapping) needs the owner's controller.
