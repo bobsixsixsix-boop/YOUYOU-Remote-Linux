@@ -226,6 +226,11 @@ impl Screen {
         // touch-mouse mode), the mouse as a mouse.
         sdl2::hint::set("SDL_TOUCH_MOUSE_EVENTS", "0");
         sdl2::hint::set("SDL_MOUSE_TOUCH_EVENTS", "0");
+        // The Wayland app_id (SDL2 has no hint for it): KWin matches it to youyou-linux.desktop for the
+        // icon, and y700-back.conf to send XF86Back instead of Esc on a side swipe (README, Y700).
+        if std::env::var_os("SDL_VIDEO_WAYLAND_WMCLASS").is_none() {
+            std::env::set_var("SDL_VIDEO_WAYLAND_WMCLASS", "youyou-linux");
+        }
         let sdl = sdl2::init()?;
         let video = sdl.video()?;
         let attr = video.gl_attr();
@@ -472,7 +477,8 @@ fn stream(screen: &mut Screen, core: Option<&Core>, device: &Value, prefs: &mut 
                     release(core, &mut input);
                     continue;
                 }
-                Event::KeyDown { scancode: Some(Scancode::F8), repeat: false, .. } => true,
+                // XF86Back: the Y700's side-swipe gesture (KWin takes the outermost strip before we see it).
+                Event::KeyDown { scancode: Some(Scancode::F8 | Scancode::AcBack), repeat: false, .. } => true,
                 Event::ControllerButtonDown { button, .. } | Event::ControllerButtonUp { button, .. }
                     if matches!(button, Button::Back | Button::Start) =>
                 {
