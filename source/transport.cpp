@@ -1,0 +1,322 @@
+#include "transport.hpp"
+#include "auth.hpp"
+#include <chrono>
+#include <fstream>
+#include <cstdio>
+#include <sys/stat.h>
+#include <mbedtls/sha1.h>
+#include <stdexcept>
+#include <thread>
+
+namespace uu {
+namespace {
+struct Curl {
+    CURL *handle = curl_easy_init();
+    curl_slist *headers = nullptr;
+    ~Curl() {
+        curl_slist_free_all(headers);
+        if (handle)
+            curl_easy_cleanup(handle);
+    }
+    void header(const std::string &k, const std::string &v) {
+        headers = curl_slist_append(headers, (v.empty() ? k + ";" : k + ": " + v).c_str());
+    }
+};
+size_t append(char *p, size_t size, size_t n, void *user) {
+    auto &out = *static_cast<std::string *>(user);
+    if (out.size() + size * n > 2 * 1024 * 1024)
+        return 0;
+    out.append(p, size * n);
+    return size * n;
+}
+int progress(void *cancel, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    return static_cast<std::atomic<bool> *>(cancel)->load() ? 1 : 0;
+}
+void common(CURL *c, std::atomic<bool> &cancel, int timeout) {
+    if (!c)
+        throw std::runtime_error("Cannot allocate HTTP client");
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, 15000L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT_MS, long(timeout));
+    curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 2L);
+#if defined(_WIN32) && defined(CURLSSLOPT_NATIVE_CA)
+    // A relocated MinGW curl may point at an absent build-time CA bundle.
+    // Use Windows trust roots while retaining chain and hostname verification.
+    if (curl_easy_setopt(c, CURLOPT_SSL_OPTIONS, long(CURLSSLOPT_NATIVE_CA)) != CURLE_OK)
+        throw std::runtime_error("Cannot configure Windows certificate trust");
+    curl_easy_setopt(c, CURLOPT_CAINFO, static_cast<const char *>(nullptr));
+    curl_easy_setopt(c, CURLOPT_CAPATH, static_cast<const char *>(nullptr));
+#endif
+    curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, progress);
+    curl_easy_setopt(c, CURLOPT_XFERINFODATA, &cancel);
+    curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(c, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+}
+} // namespace
+Json Api::request(const std::string &method, const std::string &path, const Json &data, int timeout) {
+    if (cancel_)
+        throw std::runtime_error("Canceled");
+    Curl c;
+    common(c.handle, cancel_, timeout);
+    const auto body =
+        data.is_null() ? std::string{} : data.dump(-1, ' ', false, Json::error_handler_t::strict);
+    auto headers = requestHeaders(key_, method, path, body, client_, device_, user_, nowMs());
+    if (!token_.empty())
+        headers["Authorization"] = "Bearer " + token_;
+    for (const auto &[k, v] : headers)
+        c.header(k, v);
+    const std::string url = "https://api.nrd.nie.163.com" + path;
+    std::string response;
+    char error[CURL_ERROR_SIZE]{};
+    curl_easy_setopt(c.handle, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(c.handle, CURLOPT_HTTPHEADER, c.headers);
+    curl_easy_setopt(c.handle, CURLOPT_CUSTOMREQUEST, method.c_str());
+    if (method != "GET") {
+        curl_easy_setopt(c.handle, CURLOPT_POSTFIELDS, body.c_str());
+        curl_easy_setopt(c.handle, CURLOPT_POSTFIELDSIZE, long(body.size()));
+    }
+    curl_easy_setopt(c.handle, CURLOPT_WRITEFUNCTION, append);
+    curl_easy_setopt(c.handle, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(c.handle, CURLOPT_ERRORBUFFER, error);
+    auto code = curl_easy_perform(c.handle);
+    if (code != CURLE_OK)
+        throw std::runtime_error(cancel_ ? "Canceled"
+                                         : std::string("HTTPS: ") + curl_easy_strerror(code) + " (" +
+                                               std::to_string(code) + ")");
+    long status = 0;
+    curl_easy_getinfo(c.handle, CURLINFO_RESPONSE_CODE, &status);
+    if (status == 204 || status == 205)
+        return nullptr;
+    if(status==401){logout();throw std::runtime_error("登录已失效，请重新登录");}
+    auto json = Json::parse(response, nullptr, false);
+    if (json.is_discarded() || !json.is_object())
+        throw std::runtime_error("UU returned an invalid response (HTTP " + std::to_string(status) + ")");
+    if (status < 200 || status >= 300 || json.value("code", -1) != 0)
+        throw std::runtime_error(json.value("msg", std::string("UU request failed")));
+    return json.value("data", Json{});
+}
+void Api::initialize() {
+    if (!device_.empty())
+        return;
+    auto d = request("POST", "/api/v1/device/android_tv/init",
+                     {{"name", "UU远程 Switch 主控端"},
+                      {"client_id", client_},
+                      {"system_id", client_},
+                      {"system_version", "Horizon"},
+                      {"gaid", ""},
+                      {"install_id", client_},
+                      {"build_fingerprint", "uuremote-ns"},
+                      {"brand", "Nintendo"},
+                      {"manufacturer", "Nintendo"},
+                      {"model", "Switch"},
+                      {"product", "uuremote-ns"},
+                      {"rom", ""},
+                      {"abi", "arm64-v8a"},
+                      {"resolution", "1280x720"},
+                      {"screen_size", ""},
+                      {"dpi", 96}});
+    device_ = d.value("device_id", std::string{});
+    if (device_.empty() && d.contains("current_device"))
+        device_ = d["current_device"].value("device_id", std::string{});
+    if (device_.empty())
+        throw std::runtime_error("设备初始化未返回 ID");
+}
+void Api::login(const Json &result) {
+    if (cancel_)
+        throw std::runtime_error("Canceled");
+    auto account = loginAccount(result);
+    token_ = std::move(account.token);
+    user_ = std::move(account.userId);
+    nickname_=std::move(account.nickname);
+    sessionSaved_=saveSession();
+}
+namespace {
+constexpr int kSessionVersion=2;
+constexpr const char *sessionPath=
+#ifdef __SWITCH__
+    "sdmc:/switch/UURemote-ns/session.json";
+#else
+    "session.json";
+#endif
+}
+bool Api::saveSession(){
+    if(token_.empty() || user_.empty() || device_.empty())return false;
+    const auto temp=std::string(sessionPath)+".tmp";
+    try{
+        const auto bytes=Json{{"version",kSessionVersion},{"client",client_},{"device",device_},{"token",token_},{"user",user_},{"nickname",nickname_}}.dump();
+        std::ofstream file(temp,std::ios::binary|std::ios::trunc);file.write(bytes.data(),bytes.size());file.flush();
+        const bool good=bool(file);file.close();
+        if(!good || file.fail()){std::remove(temp.c_str());return false;}
+        chmod(temp.c_str(),0600);
+        // Same-directory rename keeps a previous valid cache on failed replacement.
+        if(std::rename(temp.c_str(),sessionPath)!=0){std::remove(temp.c_str());return false;}
+        return true;
+    }catch(...){std::remove(temp.c_str());return false;}
+}
+bool Api::restoreSession(){
+    try{
+        std::ifstream file(sessionPath,std::ios::binary);if(!file)return false;
+        char buffer[16385];file.read(buffer,sizeof buffer);const auto size=file.gcount();
+        if(size<=0 || size>16384)return false;
+        const auto saved=Json::parse(buffer,buffer+size,nullptr,false);
+        if(!saved.is_object())return false;
+        const int version=saved.value("version",0);
+        if(version<1 || version>kSessionVersion)return false;
+        if(saved.value("client",std::string{})!=client_)return false;
+        auto bounded=[&](const char *key,size_t limit){auto it=saved.find(key);return it!=saved.end() && it->is_string() && !it->get_ref<const std::string&>().empty() && it->get_ref<const std::string&>().size()<=limit;};
+        if(!bounded("token",8192)||!bounded("user",256)||!bounded("device",256)||!bounded("nickname",512))return false;
+        token_=saved["token"].get<std::string>();user_=saved["user"].get<std::string>();device_=saved["device"].get<std::string>();nickname_=saved["nickname"].get<std::string>();
+        sessionSaved_=true;
+        if(version<kSessionVersion)saveSession();
+        return true;
+    }catch(...){return false;}
+}
+void Api::logout(){
+    token_.clear();user_.clear();nickname_.clear();sessionSaved_=false;
+    std::remove(sessionPath);std::remove((std::string(sessionPath)+".tmp").c_str());
+}
+SignalSocket::~SignalSocket() {
+    close();
+}
+void SignalSocket::close() {
+    if (curl_) {
+        curl_easy_cleanup(curl_);
+        curl_ = nullptr;
+    }
+    received_.clear();
+    parser_ = WsParser{};
+}
+void SignalSocket::write(const Bytes &data) {
+    size_t p = 0;
+    auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (p < data.size()) {
+        if (cancel_)
+            throw std::runtime_error("Canceled");
+        if (std::chrono::steady_clock::now() >= end)
+            throw std::runtime_error("Signaling write timeout");
+        size_t n = 0;
+        auto code = curl_easy_send(curl_, data.data() + p, data.size() - p, &n);
+        if (code == CURLE_AGAIN) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        if (code != CURLE_OK || !n)
+            throw std::runtime_error("Signaling write failed");
+        p += n;
+    }
+}
+void SignalSocket::open(const std::string &url, const std::string &token) {
+    close();
+    if (token.find_first_of("\r\n") != std::string::npos)
+        throw std::runtime_error("Invalid room token");
+    curl_ = curl_easy_init();
+    common(curl_, cancel_, 15000);
+    auto https = "https://" + url.substr(6);
+    curl_easy_setopt(curl_, CURLOPT_URL, https.c_str());
+    curl_easy_setopt(curl_, CURLOPT_CONNECT_ONLY, 1L);
+    auto code = curl_easy_perform(curl_);
+    if (code != CURLE_OK)
+        throw std::runtime_error(std::string("TLS 连接失败：") + curl_easy_strerror(code) + " (" +
+                                 std::to_string(code) + ")");
+    auto slash = https.find('/', 8);
+    auto host = https.substr(8, slash - 8), path = https.substr(slash);
+    const auto random = randomBytes(16);
+    const auto key = base64(random.data(), random.size());
+    auto req = "GET " + path + " HTTP/1.1\r\nHost: " + host +
+               "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " + key +
+               "\r\nSec-WebSocket-Version: 13\r\nX-NRD-AUTH: " + token +
+               "\r\nX-NRD-CONTROLLING: 0\r\nstreamer_version: V1.14.22\r\n\r\n";
+    write(Bytes(req.begin(), req.end()));
+    std::string response;
+    auto end = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (response.find("\r\n\r\n") == std::string::npos) {
+        if (cancel_)
+            throw std::runtime_error("Canceled");
+        if (std::chrono::steady_clock::now() >= end)
+            throw std::runtime_error("WebSocket handshake timeout");
+        char buf[8192];
+        size_t n = 0;
+        code = curl_easy_recv(curl_, buf, sizeof(buf), &n);
+        if (code == CURLE_AGAIN) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+        if (code != CURLE_OK || n == 0)
+            throw std::runtime_error("WebSocket handshake closed");
+        response.append(buf, n);
+        if (response.size() > 32768)
+            throw std::runtime_error("WebSocket header limit");
+    }
+    auto split = response.find("\r\n\r\n") + 4;
+    std::string header = response.substr(0, split);
+    auto challenge = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    uint8_t digest[20];
+    mbedtls_sha1(reinterpret_cast<const uint8_t *>(challenge.data()), challenge.size(), digest);
+    // Header names are case-insensitive, field values remain exact.
+    Headers parsed;
+    size_t p = header.find("\r\n") + 2;
+    while (p < header.size() - 2) {
+        auto e = header.find("\r\n", p), c = header.find(':', p);
+        if (c >= e)
+            throw std::runtime_error("Malformed upgrade headers");
+        auto name = header.substr(p, c - p);
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](unsigned char ch) { return std::tolower(ch); });
+        auto value = header.substr(c + 1, e - c - 1);
+        while (!value.empty() && value.front() == ' ')
+            value.erase(0, 1);
+        while (!value.empty() && value.back() == ' ')
+            value.pop_back();
+        parsed[name] = value;
+        p = e + 2;
+    }
+    if (header.rfind("HTTP/1.1 101 ", 0) != 0 || parsed["sec-websocket-accept"] != base64(digest, 20))
+        throw std::runtime_error("WebSocket upgrade rejected");
+    if (response.size() > split)
+        for (auto &m : parser_.feed(reinterpret_cast<const uint8_t *>(response.data() + split),
+                                    response.size() - split))
+            received_.push_back(std::move(m));
+}
+void SignalSocket::send(const std::string &text) {
+    Bytes b(text.begin(), text.end());
+    auto mask = randomBytes(4);
+    write(wsFrame(1, b, {mask[0], mask[1], mask[2], mask[3]}));
+}
+void SignalSocket::sendBinary(const Bytes &bytes) {
+    if (bytes.empty())
+        return;
+    auto mask = randomBytes(4);
+    write(wsFrame(2, bytes, {mask[0], mask[1], mask[2], mask[3]}));
+}
+bool SignalSocket::receive(WsMessage &message) {
+    if (received_.empty()) {
+        uint8_t buf[16384];
+        size_t n = 0;
+        auto code = curl_easy_recv(curl_, buf, sizeof(buf), &n);
+        if (code == CURLE_AGAIN)
+            return false;
+        if (code != CURLE_OK || n == 0)
+            throw std::runtime_error("信令连接已断开");
+        for (auto &m : parser_.feed(buf, n))
+            received_.push_back(std::move(m));
+    }
+    while (!received_.empty()) {
+        auto m = std::move(received_.front());
+        received_.pop_front();
+        if (m.opcode == 8)
+            throw std::runtime_error("远端已关闭信令连接");
+        if (m.opcode == 9) {
+            auto mask = randomBytes(4);
+            write(wsFrame(10, m.data, {mask[0], mask[1], mask[2], mask[3]}));
+            continue;
+        }
+        if (m.opcode == 10)
+            continue;
+        message = std::move(m);
+        return true;
+    }
+    return false;
+}
+} // namespace uu
