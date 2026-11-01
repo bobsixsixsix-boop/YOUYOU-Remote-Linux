@@ -15,12 +15,16 @@ inline bool streamSize(int width,int height) {
 // pictures allow the sample rates from AVC Annex A, HEVC Annex A and AV1 Annex A.
 struct StreamLevels { const char *avcHex; int hevc, av1; };
 inline StreamLevels streamLevels(int width,int height,int fps) {
-    if(std::max(width,height)<=1920 && std::min(width,height)<=1080) return {"1f",123,13};
+    if(fps<=120 && std::max(width,height)<=1920 && std::min(width,height)<=1080) return {"1f",123,13};
     const int macroblocks=((width+15)/16)*((height+15)/16);
     const int macroblocksPerSecond=macroblocks*fps;
     const char *avc=macroblocks<=22080 && macroblocksPerSecond<=589824?"32":
-                    macroblocksPerSecond<=983040?"33":macroblocksPerSecond<=2073600?"34":"3c";
+                    macroblocksPerSecond<=983040?"33":macroblocksPerSecond<=2073600?"34":
+                    macroblocksPerSecond<=4177920?"3c":"3d";
     const auto samples=int64_t(width)*height*fps;
-    return {avc,samples<=267386880?150:samples<=534773760?153:156,samples<=534773760?13:14};
+    // At 4096x2160 and more than 120 FPS, the sample rate also exceeds 5.2.
+    // These are negotiation ceilings, not a promise of hardware throughput.
+    return {avc,samples<=267386880?150:samples<=534773760?153:samples<=1069547520?156:183,
+                samples<=534773760?13:samples<=1069547520?14:17};
 }
 }

@@ -33,7 +33,7 @@ Architecture: $arch
 Section: net
 Priority: optional
 Maintainer: YOUYOU Linux port <noreply@localhost>
-Depends: libc6 (>= 2.43), libstdc++6, libsdl2-2.0-0, libsdl2-ttf-2.0-0, libavcodec62, libavutil60, libswscale9, libopus0, libcurl4t64, ca-certificates, curl, python3
+Depends: libc6 (>= 2.43), libstdc++6, libsdl2-2.0-0, libsdl2-ttf-2.0-0, libavcodec62, libavutil60, libswscale9, libva2, libegl1, libgles2, libopus0, libcurl4t64, ca-certificates, curl, python3
 Recommends: kdialog
 Description: Unofficial UU Remote client for Linux
  Rust tablet input and playback with the YOUYOU Remote interface, for Ubuntu 26.04.

@@ -20,6 +20,6 @@
 
 客户端使用上游随附的 Noto Sans SC 字体，安装包同时安装字体的 OFL 文本。[项目字体来源](https://github.com/doke69/YOUYOU-Remote-ns/blob/ba4d7f9f8f87f4a47e4d872db3dd0ca526718f8b/assets/fonts/OFL.txt) · [Noto CJK](https://github.com/notofonts/noto-cjk)
 
-SDL2、SDL_ttf、Opus、FFmpeg、libcurl 及其运行时依赖通过系统共享库链接。Ubuntu 系统包的版权和许可可在 `/usr/share/doc/<包名>/copyright` 查看。Rust 依赖的版本与包校验值由锁文件记录。[Cargo.lock](../Cargo.lock)
+SDL2、SDL_ttf、Opus、FFmpeg、libcurl、libva 及 GLVND 的 EGL / OpenGL ES 接口通过系统共享库链接。libva 主体采用 MIT（Expat）许可，GLVND 主体采用 MIT 许可，部分 Khronos 头文件采用 Apache-2.0。Ubuntu 系统包的完整版权和各文件许可可在 `/usr/share/doc/<包名>/copyright` 查看。Rust 依赖的版本与包校验值由锁文件记录。[Cargo.lock](../Cargo.lock)
 
 Debian 包中的 `/usr/share/doc/youyou-linux/copyright` 收录本次构建使用的原生依赖、Rust 库和静态组件的许可文本及作者声明。每个二进制发行版另附对应版本的完整源码、补丁和构建脚本。[生成版权清单的脚本](licenses.py) · [发行文件](https://github.com/bobsixsixsix-boop/YOUYOU-Remote-Linux/releases/latest)

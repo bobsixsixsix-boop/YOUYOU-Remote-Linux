@@ -18,6 +18,16 @@ int main() {
     check(deferDecodedOutput(16, 200, 120, 1032, 1000));
     check(!deferDecodedOutput(16, 200, 120, 1033, 1000));
     check(!deferDecodedOutput(16, 200, 120, 1000, 1001));
+    // At 144 / 164 fps two nominal frames fit inside the 16 ms catch-up floor.
+    // This distinguishes the new rates from accidentally clamping them to 120.
+    for(int fps : {144,164}) {
+        check(!deferDecodedOutput(1,15,fps,1000,999));
+        check(deferDecodedOutput(1,16,fps,1000,999));
+        check(!deferDecodedOutput(16,200,fps,1000,-1));
+        check(!deferDecodedOutput(0,200,fps,1000,999));
+        check(deferDecodedOutput(16,200,fps,1032,1000));
+        check(!deferDecodedOutput(16,200,fps,1033,1000));
+    }
     int last = -1, shown = 0, skipped = 0;
     for (int frame = 0; frame < 25; ++frame) {
         int now = frame * 2;

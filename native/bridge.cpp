@@ -4,6 +4,7 @@
 #include "config_store.hpp"
 #include "diagnostics.hpp"
 #include "rtc_diagnostics.hpp"
+#include "gpu_present.hpp"
 #include <chrono>
 #include <cstring>
 #include <stdexcept>
@@ -48,6 +49,29 @@ struct Core {
         uu::flushDiagnosticsLog();
     }
 };
+struct GpuHandle {
+    std::shared_ptr<uu::Media> media;
+    std::unique_ptr<uu::GpuPresenter> presenter;
+    bool failureReported=false;
+    Uint32 wakeEvent=0,windowId=0;
+    ~GpuHandle() {media->setFrameWake(0,0);media->setNativeOutput(false);}
+    int result(int code) {
+        if(!presenter->active()) {
+            media->setFrameWake(0,0);
+            media->setNativeOutput(false);
+            lastError=presenter->error();
+            if(!failureReported) {
+                uu::diagnostic(("GPU native presentation fallback: "+lastError).c_str());
+                failureReported=true;
+            }
+        }
+        return code;
+    }
+};
+GpuHandle &gpuHandle(void *value) {
+    if(!value)throw std::invalid_argument("GPU presenter is not open");
+    return *static_cast<GpuHandle*>(value);
+}
 Core &handle(void *value) {
     if (!value) throw std::invalid_argument("Client is not open");
     return *static_cast<Core *>(value);
@@ -115,13 +139,62 @@ extern "C" int yy_frame(void *value, uint64_t after, YYFrame *out) {
         auto &core = handle(value);
         core.picture = core.media->picture(after);
         const auto &p = core.picture;
-        if (!p.pixels || !p.serial) return 0;
+        if (!p.serial) return 0;
+        if(p.hardwareFrame) {
+            *out={reinterpret_cast<const uint8_t*>(p.hardwareFrame.get()),0,p.serial,p.width,p.height,3};
+            return 1;
+        }
+        if(!p.pixels)return 0;
         int32_t format = 0;
         if (p.pixelFormat == SDL_PIXELFORMAT_NV12)
             format = p.yuvMode == SDL_YUV_CONVERSION_BT709 ? 2 : 1;
         *out = {p.pixels->data(), p.pixels->size(), p.serial, p.width, p.height, format};
         return 1;
     } catch (...) { saveError(); return -1; }
+}
+
+extern "C" void *yy_gpu_open(void *value, SDL_Renderer *renderer) {
+    try {
+        auto &core=handle(value);
+        std::string error;
+        auto presenter=uu::GpuPresenter::open(renderer,error);
+        if(!presenter) {lastError=std::move(error);return nullptr;}
+        auto result=std::make_unique<GpuHandle>();
+        result->media=core.media;result->presenter=std::move(presenter);
+        const Uint32 type=SDL_RegisterEvents(1);
+        if(type!=Uint32(-1)) {
+            result->wakeEvent=type;
+            if(auto *window=SDL_RenderGetWindow(renderer))result->windowId=SDL_GetWindowID(window);
+            result->media->setFrameWake(type,result->windowId);
+        } else uu::diagnostic("GPU frame wake registration failed; using timed polling");
+        result->media->setNativeOutput(true);
+        return result.release();
+    } catch(...) {saveError();return nullptr;}
+}
+extern "C" void yy_gpu_close(void *value) {delete static_cast<GpuHandle*>(value);}
+extern "C" int yy_gpu_upload(void *value, const void *avframe) {
+    try {
+        auto &gpu=gpuHandle(value);
+        if(!avframe)throw std::invalid_argument("Missing GPU frame");
+        return gpu.result(gpu.presenter->upload(static_cast<const AVFrame*>(avframe)));
+    } catch(...) {saveError();return -1;}
+}
+extern "C" int yy_gpu_draw(void *value, int x, int y, int width, int height) {
+    try {auto &gpu=gpuHandle(value);return gpu.result(gpu.presenter->draw(x,y,width,height));}
+    catch(...) {saveError();return -1;}
+}
+extern "C" int yy_gpu_presented(void *value) {
+    try {auto &gpu=gpuHandle(value);return gpu.result(gpu.presenter->presented());}
+    catch(...) {saveError();return -1;}
+}
+extern "C" int yy_gpu_reset(void *value) {
+    try {
+        auto &gpu=gpuHandle(value);
+        const int result=gpu.presenter->reset();
+        if(gpu.presenter->active()&&gpu.wakeEvent)gpu.media->setFrameWake(gpu.wakeEvent,gpu.windowId);
+        return gpu.result(result);
+    }
+    catch(...) {saveError();return -1;}
 }
 
 // Link-time interception measures successful submissions to this library's

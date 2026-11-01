@@ -72,18 +72,28 @@ Field only(const std::vector<Field> &message, unsigned number) {
 void wire() {
     const std::string client = "3a5fa985-97ce-4d2b-8414-864f0939b9cf";
     for (const auto size : {std::make_pair(3040,1904), std::make_pair(1904,3040), std::make_pair(1724,1080)}) {
+      for (int fps : {120,144,164}) {
         for (int codec = 0; codec < 3; ++codec) {
-            const auto normal = connectOptions(size.first,size.second,120,3,0,codec == 1,codec == 2);
-            check(normal == connectOptions(size.first,size.second,120,3,0,codec == 1,codec == 2,false,client),
+            const auto normal = connectOptions(size.first,size.second,fps,3,0,codec == 1,codec == 2);
+            check(normal == connectOptions(size.first,size.second,fps,3,0,codec == 1,codec == 2,false,client),
                   "normal desktop changed when a stable client ID was supplied");
-            auto extended = fields(connectOptions(size.first,size.second,120,3,0,codec == 1,codec == 2,true,client));
+            auto extended = fields(connectOptions(size.first,size.second,fps,3,0,codec == 1,codec == 2,true,client));
             check(only(extended,1).wire == 0 && only(extended,1).value == 6, "CT_SECOND_SCREEN must be 6");
             const auto id = only(extended,9);
             check(id.wire == 2 && std::string(id.bytes.begin(),id.bytes.end()) == client, "stable client ID is missing");
             const auto modes = fields(only(extended,6).bytes);
             check(modes.size() == 3 && only(modes,1).value == unsigned(size.first) &&
-                  only(modes,2).value == unsigned(size.second) && only(modes,3).value == 120,
+                  only(modes,2).value == unsigned(size.second) && only(modes,3).value == unsigned(fps),
                   "second-screen mode must contain width, height and requested cadence");
+            const auto capture=fields(only(extended,3).bytes);
+            check(only(capture,1).value==4 && only(capture,11).value==unsigned(fps),
+                  "second-screen capture cadence differs from requested virtual display cadence");
+            unsigned decoderCount=0;
+            for(const auto &field : extended) if(field.number==4) {
+                ++decoderCount;
+                check(only(fields(field.bytes),1).value==unsigned(fps), "second-screen decoder capability lost exact cadence");
+            }
+            check(decoderCount>0, "second-screen request has no decoder capability");
             const auto initial = fields(only(extended,7).bytes);
             check(initial.size() == 2 && only(initial,1).value == unsigned(size.first) &&
                   only(initial,2).value == unsigned(size.second), "incorrect initial second-screen resolution");
@@ -95,9 +105,10 @@ void wire() {
                 normalized.push_back(std::move(field));
             }
             check(normalized == fields(normal), "second-screen request changed unrelated legacy wire fields");
-            check(extended == fields(connectOptions(size.first,size.second,120,3,0,codec == 1,codec == 2,true,client)),
+            check(extended == fields(connectOptions(size.first,size.second,fps,3,0,codec == 1,codec == 2,true,client)),
                   "reconnection changed the second-screen client identity");
         }
+      }
     }
     bool rejected = false;
     try { connectOptions(3040,1904,120,3,0,false,false,true,""); }
@@ -245,6 +256,15 @@ void lifecycle() {
     displays.observe({physical,resized},19);
     check(!displays.view.pending && displays.view.capturesOwnedSize(1600,900) &&
           !displays.beginInitialMode(46,0), "confirmed official desktop mode did not settle once");
+    for(int fps : {144,164}) {
+        VirtualDisplays highRate;
+        highRate.beginSecondScreenSession(1600,900,fps);
+        highRate.observe({physical,session},19);
+        const auto mode=highRate.beginInitialMode(47,0);
+        check(mode && mode->fps==fps && mode->w==1600 && mode->h==900,
+              "second-screen initialization capped requested cadence");
+        check(!highRate.beginInitialMode(48,0), "high-rate initialization was sent twice");
+    }
 }
 
 void commandGuards() {

@@ -178,17 +178,20 @@ live = live.replace('row(2,"垂直同步",46,true,false,vsync?"开启":"关闭")
 live = live.replace('codec=s.hevc;', 'codec=s.av1?2:s.hevc?1:0;')
 live = live.replace('{"hevc",bool(codec)}','{"hevc",codec==1},{"av1",codec==2}')
 live = live.replace('if(uu::display::vsync(renderer,vsync?1:0)!=0)', 'if(vsync!=s.vsync && uu::display::vsync(renderer,vsync?1:0)!=0)')
-live = live.replace('case 40:fps=60;', 'case 840:fps=120;applyQuality(s);break;case 40:fps=60;')
+live = live.replace('case 40:fps=60;', 'case 842:fps=164;applyQuality(s);break;case 841:fps=144;applyQuality(s);break;case 840:fps=120;applyQuality(s);break;case 40:fps=60;')
 live = live.replace('row(0,"60 帧",40,true,fps==60);row(1,"30 帧",41,true,fps==30);',
-                    'row(0,"120 帧",840,true,fps==120);row(1,"60 帧",40,true,fps==60);row(2,"30 帧",41,true,fps==30);')
-live = live.replace('row(2,"画质档位"', 'row(3,"画质档位"').replace('row(3,"播放缓冲"', 'row(4,"播放缓冲"')
-live = live.replace('row(4,"播放缓冲",47,true,false,std::to_string(bufferMs)+" ms");break;', '''
-            row(4,"播放缓冲",47,true,false,std::to_string(bufferMs)+" ms");
+                    'row(0,"164 帧",842,true,fps==164);row(1,"144 帧",841,true,fps==144);row(2,"120 帧",840,true,fps==120);row(3,"60 帧",40,true,fps==60);row(4,"30 帧",41,true,fps==30);')
+# Seven quality rows fit the same sheet with 48 px targets and 8 px gaps.
+live = live.replace('add(848,176+n*76,376,64,std::move(title),action,enabled,chosen,std::move(value),Kind::Menu);',
+                    'add(848,page==Page::Quality?148+n*56:176+n*76,376,page==Page::Quality?48:64,std::move(title),action,enabled,chosen,std::move(value),Kind::Menu);')
+live = live.replace('row(2,"画质档位"', 'row(5,"画质档位"').replace('row(3,"播放缓冲"', 'row(6,"播放缓冲"')
+live = live.replace('row(6,"播放缓冲",47,true,false,std::to_string(bufferMs)+" ms");break;', '''
+            row(6,"播放缓冲",47,true,false,std::to_string(bufferMs)+" ms");
             if(snapshot.streaming && stats.presentFps>=0)
-                aligned(r,f.small,"当前显示　"+number(stats.presentFps)+" FPS",{848,562,376,48},label);
+                aligned(r,f.small,"当前显示　"+number(stats.presentFps)+" FPS",{848,540,376,32},label);
             break;''')
-live = live.replace('(a==40||a==41||a==46', '(a==840||a==40||a==41||a==46')
-live = live.replace('(b.action==40 || b.action==41)', '(b.action==840 || b.action==40 || b.action==41)')
+live = live.replace('(a==40||a==41||a==46', '(a==842||a==841||a==840||a==40||a==41||a==46')
+live = live.replace('(b.action==40 || b.action==41)', '(b.action==842 || b.action==841 || b.action==840 || b.action==40 || b.action==41)')
 live = live.replace('codec?"H.265":"H.264"', 'codec==2?"AV1 优先":codec==1?"H.265":"H.264"')
 live = live.replace('row(0,"H.264",500,true,codec==0);row(1,"H.265",501,true,codec==1);break;', '''
             row(0,"AV1 优先",502,true,codec==2);

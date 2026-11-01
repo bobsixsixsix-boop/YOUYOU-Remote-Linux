@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr::NonNull;
-use youyou_player::{Format, Frame, PlayerStatus, Session};
+use youyou_player::{BorrowedAvFrame, Format, Frame, FrameData, GpuVideo, PlayerStatus, Session};
 
 #[repr(C)]
 struct NativeFrame {
@@ -111,6 +111,21 @@ impl Session for Core {
         {
             return Err("无效的视频帧尺寸".into());
         }
+        if raw.format == 3 {
+            if raw.size != 0 {
+                return Err("硬件视频帧不能含有像素数据长度".into());
+            }
+            self.serial = raw.serial;
+            // yy_frame retains this AVFrame until its next call or yy_close.
+            // Tie the opaque handle to this Core borrow, never to a byte slice.
+            let frame = unsafe { BorrowedAvFrame::from_raw(raw.data.cast(), self) }
+                .ok_or_else(|| "空的硬件视频帧".to_string())?;
+            return Ok(Some(Frame {
+                width: raw.width as u32,
+                height: raw.height as u32,
+                data: FrameData::Vaapi(frame),
+            }));
+        }
         let samples = raw.width as usize * raw.height as usize;
         let (format, size) = match raw.format {
             0 => (Format::Rgba, samples * 4),
@@ -128,12 +143,22 @@ impl Session for Core {
         Ok(Some(Frame {
             width: raw.width as u32,
             height: raw.height as u32,
-            format,
-            pixels,
+            data: FrameData::Pixels {
+                format,
+                bytes: pixels,
+            },
         }))
     }
     fn input(&mut self, data: Value) -> Result<(), String> {
         self.command("input", data)
+    }
+    fn gpu_video(&mut self, canvas: &sdl2::render::WindowCanvas) -> Option<GpuVideo> {
+        if !youyou_player::gpu_video_requested() {
+            return None;
+        }
+        // play_loop drops its renderer-local presenter before this Core and the
+        // caller-owned canvas can be destroyed. It never leaves the SDL thread.
+        unsafe { GpuVideo::open(self.ptr.as_ptr(), canvas) }
     }
     fn status(&mut self) -> Result<PlayerStatus, String> {
         let s = self.state()?;

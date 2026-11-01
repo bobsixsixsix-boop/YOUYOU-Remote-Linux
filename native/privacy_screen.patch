@@ -96,7 +96,7 @@
 +        if(state_.privacyKnown)state_.privacyMode=mode;
 +        // A push can reflect changes made on the PC or by another client.
 +        // It cannot acknowledge our request ID or release its pending guard.
-+        state_.privacyNotice=code?"电脑报告防窥异常，错误码 "+std::to_string(code):
++        state_.privacyNotice=code==508?"当前专用桌面模式不支持防窥，请切换普通桌面后重试":code?"电脑报告防窥异常，错误码 "+std::to_string(code):
 +            state_.privacyPending?"正在等待电脑操作回执":state_.privacyKnown?"状态由电脑端报告":"电脑未报告当前模式";
      } else if(e=="privacy-screen-ack") {
          if(!pendingPrivacy_ || data.at("id").get<uint64_t>()!=pendingPrivacy_->id)return;
@@ -106,7 +106,7 @@
 -        else state_.privacyKnown=false;
 -        if(code!=0)state_.privacyNotice="电脑未完成屏幕保护设置，错误码 "+std::to_string(code);
 +        // Preserve an authoritative push received after this request was sent.
-+        if(code!=0)state_.privacyNotice="电脑未完成操作，错误码 "+std::to_string(code)+"。请检查被控端权限。";
++        if(code!=0)state_.privacyNotice=code==508?"当前专用桌面模式不支持防窥，请切换普通桌面后重试":"电脑未完成防窥操作，错误码 "+std::to_string(code);
          else if(echoed!=PrivacyMode::Unknown && echoed!=requested)
              state_.privacyNotice="电脑返回的请求模式不一致，请核对当前屏幕状态";
          else if(reported==PrivacyMode::Unknown)

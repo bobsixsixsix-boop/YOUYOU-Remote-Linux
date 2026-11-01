@@ -113,7 +113,7 @@ def virtual_display_ui(tv,live):
             add(848,174,376,58,switching?"正在切换专用桌面…":"记忆专用桌面",9048,
                 ready && v.session && !v.pending && !switching,snapshot.secondScreen,"",Kind::Toggle);
             twoLineLabel(r,f.small,switching?"正在重新连接，请稍候":!desktopModeRetryNotice.empty()?desktopModeRetryNotice:
-                "位置由电脑保存，连接时自动恢复。切换会重连",
+                "电脑记忆屏幕位置。此模式不支持防窥，切换会重连",
                          {848,240,376,56},label);
             if(snapshot.secondScreen){
                 const std::string actual=managed?"专用桌面　"+std::to_string(managed->width)+"×"+std::to_string(managed->height)+

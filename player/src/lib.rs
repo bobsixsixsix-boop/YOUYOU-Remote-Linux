@@ -1,11 +1,13 @@
 //! Linux desktop front end. The native session owns the decoders and SDL audio.
 mod controllers;
 pub mod fullscreen;
+mod gpu;
 pub mod icons;
 mod input;
 mod menu;
 mod touch;
 pub use controllers::{Controllers, PadAction};
+pub use gpu::{gpu_video_requested, BorrowedAvFrame, GpuVideo, Upload as GpuUpload};
 pub use menu::{attach_upstream, menu_self_test, preview, Menu};
 use touch::{EdgeSwipe, Route, Touch};
 
@@ -33,8 +35,12 @@ pub enum Format {
 pub struct Frame<'a> {
     pub width: u32,
     pub height: u32,
-    pub format: Format,
-    pub pixels: &'a [u8],
+    pub data: FrameData<'a>,
+}
+
+pub enum FrameData<'a> {
+    Pixels { format: Format, bytes: &'a [u8] },
+    Vaapi(BorrowedAvFrame<'a>),
 }
 
 pub struct PlayerStatus {
@@ -59,6 +65,9 @@ impl PlayerStatus {
 pub trait Session {
     fn menu(&mut self, _: &WindowCanvas) -> Result<Option<Box<dyn Menu>>, String> {
         Ok(None)
+    }
+    fn gpu_video(&mut self, _: &WindowCanvas) -> Option<GpuVideo> {
+        None
     }
     /// Return each decoded frame at most once. Audio is played by the session.
     fn frame(&mut self) -> Result<Option<Frame<'_>>, String>;
@@ -87,25 +96,48 @@ struct VideoTexture<'a> {
     texture: Texture<'a>,
     format: Format,
 }
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum VideoSource {
+    None,
+    Cpu,
+    Gpu,
+}
+
+fn cpu_fallback(texture: Option<&VideoTexture<'_>>, size: &mut (u32, u32)) -> VideoSource {
+    if let Some(texture) = texture {
+        let info = texture.texture.query();
+        *size = (info.width, info.height);
+        VideoSource::Cpu
+    } else {
+        VideoSource::None
+    }
+}
 fn upload<'a>(
     creator: &'a TextureCreator<WindowContext>,
     texture: &mut Option<VideoTexture<'a>>,
     frame: &Frame<'_>,
     access: TextureAccess,
 ) -> Result<(), String> {
+    let FrameData::Pixels {
+        format: pixel_format,
+        bytes,
+    } = &frame.data
+    else {
+        return Err("硬件视频帧不能作为像素上传".into());
+    };
     if frame.width == 0 || frame.height == 0 || frame.width > 16384 || frame.height > 16384 {
         return Err(format!("无效画面尺寸 {} × {}", frame.width, frame.height));
     }
     let w = frame.width as usize;
     let h = frame.height as usize;
-    let (format, pitch, size) = match frame.format {
+    let (format, pitch, size) = match pixel_format {
         Format::Rgba => (PixelFormatEnum::RGBA32, w * 4, w * h * 4),
         Format::Nv12Bt601 | Format::Nv12Bt709 => {
             if w % 2 != 0 || h % 2 != 0 {
                 return Err("NV12 尺寸必须为偶数".into());
             }
             use sdl2::sys::SDL_YUV_CONVERSION_MODE::*;
-            let mode = if frame.format == Format::Nv12Bt709 {
+            let mode = if *pixel_format == Format::Nv12Bt709 {
                 SDL_YUV_CONVERSION_BT709
             } else {
                 SDL_YUV_CONVERSION_BT601
@@ -118,12 +150,12 @@ fn upload<'a>(
             (PixelFormatEnum::NV12, w, w * h * 3 / 2)
         }
     };
-    if frame.pixels.len() != size {
+    if bytes.len() != size {
         return Err("解码画面数据长度不符".into());
     }
     let fresh = texture.as_ref().map_or(true, |t| {
         let q = t.texture.query();
-        t.format != frame.format
+        t.format != *pixel_format
             || (q.format, q.width, q.height) != (format, frame.width, frame.height)
     });
     if fresh {
@@ -135,14 +167,14 @@ fn upload<'a>(
         next.set_scale_mode(ScaleMode::Linear);
         *texture = Some(VideoTexture {
             texture: next,
-            format: frame.format,
+            format: *pixel_format,
         });
     }
     texture
         .as_mut()
         .unwrap()
         .texture
-        .update(None, frame.pixels, pitch)
+        .update(None, bytes, pitch)
         .map_err(|e| e.to_string())
 }
 
@@ -218,6 +250,8 @@ fn play_loop(
     canvas: &mut WindowCanvas,
 ) -> Result<Exit, String> {
     let mut menu = session.menu(canvas)?;
+    let mut gpu = session.gpu_video(canvas);
+    let mut video_source = VideoSource::None;
     let mut fullscreen_button = fullscreen::Control::default();
     let mut menu_flags = 0;
     let mut menu_pointers = MenuPointers::default();
@@ -292,6 +326,10 @@ fn play_loop(
                 if streaming && !status.streaming {
                     texture = None;
                     spare_texture = None;
+                    if let Some(gpu) = &mut gpu {
+                        gpu.reset()?;
+                    }
+                    video_source = VideoSource::None;
                     redraw = true;
                 }
                 if streaming != status.streaming {
@@ -326,28 +364,56 @@ fn play_loop(
                         .min(Duration::from_millis(8));
                     next_check = arrived + lead;
                     last_frame = arrived;
-                    size = (frame.width, frame.height);
-                    if rotate_textures {
-                        // The GPU may still be reading the last displayed texture.
-                        // Write the next frame into a different texture, without
-                        // adding a frame to the presentation queue.
-                        std::mem::swap(&mut texture, &mut spare_texture);
-                    }
-                    if let Err(err) = upload(&creator, &mut texture, &frame, access) {
-                        if !rotate_textures || spare_texture.is_none() {
-                            return Err(err);
+                    match &frame.data {
+                        FrameData::Pixels { .. } => {
+                            if rotate_textures {
+                                // CPU uploads use their own pair of SDL textures.
+                                // These are never the presenter's imported images.
+                                std::mem::swap(&mut texture, &mut spare_texture);
+                            }
+                            if let Err(err) = upload(&creator, &mut texture, &frame, access) {
+                                if !rotate_textures || spare_texture.is_none() {
+                                    return Err(err);
+                                }
+                                rotate_textures = false;
+                                texture = spare_texture.take();
+                                upload(&creator, &mut texture, &frame, access)?;
+                            }
+                            if video_source == VideoSource::Gpu {
+                                if let Some(gpu) = &mut gpu {
+                                    gpu.reset()?;
+                                }
+                            }
+                            video_source = VideoSource::Cpu;
+                            size = (frame.width, frame.height);
+                            new_video_frame = true;
+                            redraw = true;
                         }
-                        rotate_textures = false;
-                        texture = spare_texture.take();
-                        upload(&creator, &mut texture, &frame, access)?;
+                        FrameData::Vaapi(native) => {
+                            let gpu = gpu.as_mut().ok_or("硬件视频帧没有可用的显示器")?;
+                            match gpu.upload(native)? {
+                                gpu::Upload::Imported => {
+                                    video_source = VideoSource::Gpu;
+                                    size = (frame.width, frame.height);
+                                    new_video_frame = true;
+                                    redraw = true;
+                                }
+                                gpu::Upload::Busy => {} // Keep the last imported frame and size.
+                                gpu::Upload::Fallback => {
+                                    // Native failure has safely retired its images and
+                                    // disabled new hardware output. Retain any CPU image
+                                    // until the decoder supplies the next CPU frame.
+                                    video_source = cpu_fallback(texture.as_ref(), &mut size);
+                                    redraw = true;
+                                }
+                            }
+                        }
                     }
-                    new_video_frame = true;
-                    redraw = true;
                 }
             }
             let output = canvas.output_size()?;
             let logical = canvas.window().size();
-            let view = fit(output, size);
+            let mut view = fit(output, size);
             if let Some(ui) = &mut menu {
                 let flags = ui.tick(0, 0, 0, "")?;
                 redraw |= flags != menu_flags
@@ -359,7 +425,25 @@ fn play_loop(
                 }
             }
             if redraw {
-                paint(canvas, texture.as_ref(), view)?;
+                paint(
+                    canvas,
+                    if video_source == VideoSource::Cpu {
+                        texture.as_ref()
+                    } else {
+                        None
+                    },
+                    view,
+                )?;
+                let mut gpu_drawn = false;
+                if video_source == VideoSource::Gpu {
+                    gpu_drawn = gpu.as_mut().ok_or("GPU 显示器已失效")?.draw(view)?;
+                    if !gpu_drawn {
+                        video_source = cpu_fallback(texture.as_ref(), &mut size);
+                        view = fit(output, size);
+                        paint(canvas, texture.as_ref(), view)?;
+                        new_video_frame = false;
+                    }
+                }
                 if let Some(ui) = &mut menu {
                     ui.draw()?;
                 }
@@ -372,6 +456,11 @@ fn play_loop(
                 }
                 menu_paint = Instant::now();
                 redraw = false;
+                if gpu_drawn && !gpu.as_mut().unwrap().presented()? {
+                    video_source = cpu_fallback(texture.as_ref(), &mut size);
+                    view = fit(output, size);
+                    redraw = true;
+                }
             }
             let elapsed = rate_start.elapsed();
             if streaming && elapsed >= Duration::from_secs(1) {
@@ -460,7 +549,9 @@ fn play_loop(
                     match edge_swipe.route(sample, logical, eligible) {
                         Route::Hold => continue,
                         Route::OpenMenu => open_by_swipe = true,
-                        Route::Replay(samples) if can_control && texture.is_some() => {
+                        Route::Replay(samples)
+                            if can_control && video_source != VideoSource::None =>
+                        {
                             send_touches(session, &mut keys, view, output, samples)?;
                         }
                         _ => {}
@@ -652,7 +743,10 @@ fn play_loop(
                         redraw = true;
                     }
                     Event::Window { .. } => redraw = true,
-                    _ if !focused || !can_control || texture.is_none() || menu_flags & 1 != 0 => {}
+                    _ if !focused
+                        || !can_control
+                        || video_source == VideoSource::None
+                        || menu_flags & 1 != 0 => {}
                     Event::KeyDown {
                         scancode: Some(s),
                         repeat: false,
@@ -718,13 +812,17 @@ fn play_loop(
                 }
             }
             if let Some(samples) = edge_swipe.expired(timer.ticks()) {
-                if focused && can_control && texture.is_some() && menu_flags & 1 == 0 {
+                if focused
+                    && can_control
+                    && video_source != VideoSource::None
+                    && menu_flags & 1 == 0
+                {
                     send_touches(session, &mut keys, view, output, samples)?;
                 }
             }
             if focused
                 && can_control
-                && texture.is_some()
+                && video_source != VideoSource::None
                 && (menu.is_none() || menu_flags & 3 == 2)
                 && pad_poll.elapsed() >= Duration::from_millis(8)
             {
@@ -807,8 +905,10 @@ fn check_sdl_input(sdl: &sdl2::Sdl) -> Result<(), String> {
             frame: Some(Frame {
                 width: 4,
                 height: 2,
-                format: Format::Rgba,
-                pixels: &[128; 4 * 2 * 4],
+                data: FrameData::Pixels {
+                    format: Format::Rgba,
+                    bytes: &[128; 4 * 2 * 4],
+                },
             }),
             ready,
         };
@@ -913,8 +1013,10 @@ pub fn self_test() -> Result<(), String> {
             &Frame {
                 width: 2,
                 height: 2,
-                format: fmt,
-                pixels: &buf,
+                data: FrameData::Pixels {
+                    format: fmt,
+                    bytes: &buf,
+                },
             },
             TextureAccess::Streaming,
         )?;

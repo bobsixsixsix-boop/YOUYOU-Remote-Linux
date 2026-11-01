@@ -1,9 +1,21 @@
 mod core;
 mod lobby;
+mod startup_config;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 fn main() {
+    // Only ordinary desktop startup reads this optional preference. CLI paths
+    // stay relative to the caller's directory and explicit environment wins.
+    if std::env::args_os().len() == 1
+        && std::env::var_os("YOUYOU_GPU_VIDEO").is_none()
+        && startup_config::gpu_video_configured()
+    {
+        std::env::set_var("YOUYOU_GPU_VIDEO", "1");
+    }
+    if youyou_player::gpu_video_requested() && std::env::var_os("SDL_RENDER_DRIVER").is_none() {
+        std::env::set_var("SDL_RENDER_DRIVER", "opengles2");
+    }
     // SDL2 in Ubuntu can prefer XWayland even inside Plasma Wayland. At a
     // fractional desktop scale that gives us a compositor-upscaled buffer.
     if std::env::var_os("SDL_VIDEODRIVER").is_none()

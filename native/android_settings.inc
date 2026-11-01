@@ -7,7 +7,7 @@ std::string description(Page page,std::pair<int,int> panel,int field) {
     switch(page){
         case Page::Display:return "选择要调整的串流项目";
         case Page::Picture:return "调整发送到平板的画面和带宽";
-        case Page::Quality:return "选择目标帧率，也可以调整画质和缓冲";
+        case Page::Quality:return "选择目标帧率，实际以串流统计为准";
         case Page::QualityPreset:return "使用电脑端预设，或为本次配置指定码率";
         case Page::Codec:return "下次连接时协商，AV1 优先可回退到 H.265 或 H.264";
         case Page::Resolution:return "平板屏幕  "+std::to_string(panel.first)+" × "+std::to_string(panel.second)+"   ·   连接后可查看实际接收尺寸";
@@ -68,7 +68,7 @@ void overview(SDL_Renderer *r,Fonts &f,const Layout &g,const std::string &size,
 
 bool radio(Page p,int a) {
     switch(p){
-        case Page::Quality:return a==840 || a==40 || a==41;
+        case Page::Quality:return a==842 || a==841 || a==840 || a==40 || a==41;
         case Page::Codec:case Page::Bitrate:case Page::Playout:return true;
         case Page::Resolution:return a!=3030;
         case Page::FixedResolution:return a!=3000;
@@ -161,10 +161,10 @@ void draw(SDL_Renderer *r,Fonts &f,Page page,const std::string &title,
     aligned(r,f.hint,invalid?error:description(page,panel,field),
             {g.mainX,g.headingY+47,g.mainW,34},invalid?SDL_Color{172,50,42,255}:secondary);
 
-    const int gap=6, inset=8;
+    const int gap=page==Page::Quality?8:6, inset=8;
     const bool keypad=page==Page::CustomResolution, pair=page==Page::Bitrate;
     const int rows=keypad?6:pair?(count+1)/2:count;
-    const int step=page==Page::Display?84:rows>=6?54:64;
+    const int step=page==Page::Display?84:page==Page::Quality?56:rows>=6?54:64;
     const int height=rows*step+inset*2;
     card(r,{g.mainX,g.listY,g.mainW,height});
     for(int i=0;i<count;++i){

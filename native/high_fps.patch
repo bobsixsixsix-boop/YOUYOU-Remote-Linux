@@ -1,0 +1,123 @@
+--- a/include/client.hpp
++++ b/include/client.hpp
+@@ -143,7 +143,7 @@
+     struct PendingVideoScale {uint64_t id;int64_t deadline;int sourceWidth,sourceHeight,targetWidth,targetHeight;bool acknowledged=false;uint64_t mediaEpoch=0,publishedBefore=0;};
+     std::optional<PendingVideoScale> pendingVideoScale_;
+     bool videoScaleAttempted_=false,videoScaleVerified_=false;
+-    int offerWidth_=0,offerHeight_=0;
++    int offerWidth_=0,offerHeight_=0,offerFps_=0;
+     int64_t nextVideoScaleCheck_=0;
+     void tickVideoScale();
+     void setVideoScaleNotice(const std::string &);
+--- a/client.cpp
++++ b/client.cpp
+@@ -488,7 +488,7 @@
+                     std::to_string(streamHeight_)).c_str());
+         streamWidth_=1280;streamHeight_=720;
+     }
+-    streamFps_ = configInt("fps", 120, 30, 120);
++    streamFps_ = configInt("fps", 120, 30, maxCaptureFps);
+     streamQuality_ = configInt("quality", 3, 1, 6);
+     maxBitrateMbps_=configInt("max_bitrate_mbps",0,0,100);
+     if(streamQuality_==6 && maxBitrateMbps_==0)streamQuality_=4;
+@@ -780,10 +780,10 @@
+         const QualityApplicationTarget target{targetWidth,targetHeight,targetFps,targetQuality,targetCap};
+         // Evidence is accumulated for the lifetime of the current request.
+         // Split sync messages can therefore jointly prove a complete match.
+-        // Sync echoes the legacy tier, not fpsCount. A returned 144 tier alone
+-        // cannot confirm that a 120 fps custom request was applied.
+-        if(hasFps && syncFps && !(targetFps==120 && syncFps==144))
+-            qualityApply_.evidence.observeFps(syncFps);
++        // Sync echoes the legacy tier, not fpsCount. It cannot establish an
++        // exact 120/164 FPS request; presentation statistics stay independent.
++        const int syncEvidence=captureRateSyncEvidence(targetFps,data.value("fps",0));
++        if(hasFps && syncEvidence)qualityApply_.evidence.observeFps(syncEvidence);
+         if(hasQuality)qualityApply_.evidence.observeQuality(syncQuality);
+         if(hasWidth)qualityApply_.evidence.observeWidth(syncWidth);
+         if(hasHeight)qualityApply_.evidence.observeHeight(syncHeight);
+@@ -894,6 +894,9 @@
+             reconnectQuality(target,"尚未收到电脑屏幕信息，正在重连应用…");return;
+         }
+         const auto id=nextQualityRpc_++;
++        if(fps>120 && fps>offerFps_){
++            reconnectQuality(target,"正在重新连接以应用更高帧率…");return;
++        }
+         const bool qualityOnly=!resolutionChanged;
+         const bool fpsChanged=fps!=streamFps_;
+         const bool qualityChanged=quality!=streamQuality_;
+@@ -901,7 +904,7 @@
+         Bytes bytes;
+         std::string rpcMode;
+         QualityRpcKind rpcKind=QualityRpcKind::QualityOnly;
+-        if(qualityOnly && fps!=120 && fpsChanged && !qualityChanged && !customBitrateChanged && fpsSettingSupported_){
++        if(qualityOnly && enumOnlyCaptureRate(fps) && fpsChanged && !qualityChanged && !customBitrateChanged && fpsSettingSupported_){
+             // Protocol-native FpsSettingRequest: frame rate only. This is safe
+             // for custom-bitrate (q6) sessions because it carries no bitrate or
+             // resolution field.
+@@ -1494,7 +1497,7 @@
+             if ((!remote_.is_string() && !remote_.is_number()) || remote_ == "")
+                 throw std::runtime_error("房间内没有在线电脑");
+             control_ = uuid();
+-            offerWidth_=streamWidth_;offerHeight_=streamHeight_;
++            offerWidth_=streamWidth_;offerHeight_=streamHeight_;offerFps_=streamFps_;
+             auto options = connectOptions(streamWidth_, streamHeight_, streamFps_, streamQuality_,streamQuality_==6?maxBitrateMbps_:0,
+                                           hevc_,av1_,secondScreen_,api_->device());
+             diagnostic(("encoder-bitrate-request-connect-bps-"+
+--- a/config_store.cpp
++++ b/config_store.cpp
+@@ -326,7 +326,7 @@
+     }
+     if(text.empty()) return fallback;
+     if(key == "fps")
+-        return config::choice(text, fallback, {30, 60, 120});
++        return config::choice(text, fallback, {30, 60, 120, 144, 164});
+     return config::integer(text, fallback, minimum, maximum);
+ }
+ bool secondScreenForDevice(const std::string &deviceId) {
+--- a/media.cpp
++++ b/media.cpp
+@@ -1,5 +1,6 @@
+ #include "cpu_diagnostics.hpp"
+ #include "media.hpp"
++#include "capture_rate.hpp"
+ #include "stream_size.hpp"
+ #include "media_integrity.hpp"
+ #include "playout_policy.hpp"
+@@ -229,7 +230,7 @@
+     Picture latest;
+     std::deque<Picture> ready;
+     size_t readyBytes = 0;
+-    // Up to 100 ms of requested delay at 60 fps plus two burst frames.
++    // Up to 100 ms of requested delay at the target rate plus two burst frames.
+     // Hardware frames still count against the independent 32 MiB bound.
+ 
+     int streamFps = 60;
+@@ -294,7 +295,7 @@
+         readyBytes+=p.pixelBytes();
+         ready.push_back(std::move(p));
+         noteArrival(now);
+-        trimPlayout(std::max(8,(streamFps+9)/10+2));
++        trimPlayout(capturePlayoutFrameBudget(streamFps));
+         while(readyBytes>32u*1024u*1024u && !ready.empty()) {
+             tracePicture(ready.front(),mediaClockMs(),"queue_bytes");++skipBound;
+             readyBytes-=ready.front().pixelBytes();ready.pop_front();++presentationSkipped;++playoutOverflowDrop;
+@@ -1376,7 +1377,7 @@
+ void Media::setNativeOutput(bool enabled) { impl_->nativeOutput.store(enabled); }
+ void Media::setTargetFps(int fps) {
+     std::lock_guard lock(impl_->mutex);
+-    impl_->streamFps=std::clamp(fps,30,120);
++    impl_->streamFps=std::clamp(fps,30,maxCaptureFps);
+ }
+ void Media::setPlayoutDelay(int milliseconds) {
+     std::lock_guard lock(impl_->mutex);
+--- a/quality_rpc.cpp
++++ b/quality_rpc.cpp
+@@ -174,7 +174,7 @@
+     return out;
+ }
+ Bytes fpsSettingRpc(uint64_t id,int fps){
+-    if(!id || (fps!=30&&fps!=60))throw std::invalid_argument("Invalid fps setting");
++    if(!id || !enumOnlyCaptureRate(fps))throw std::invalid_argument("Invalid fps setting");
+     Bytes body,header,rpc,out;
+     integer(body,1,fps==30?1:2); // gv_pb.FPS: FPS_30=1, FPS_60=2
+     integer(header,1,id);message(rpc,1,header);message(rpc,3,body);

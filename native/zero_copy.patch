@@ -1,0 +1,175 @@
+--- a/media.cpp
++++ b/media.cpp
+@@ -981,6 +981,11 @@
+                         av_frame_unref(frame);
+                         continue;
+                     }
++                    // Sample once so a UI fallback cannot race transfer vs publication.
++                    bool nativeVaapi=false;
++#ifndef __SWITCH__
++                    nativeVaapi=nativeOutput.load() && frame->format==AV_PIX_FMT_VAAPI;
++#endif
+                     // Receiving maintains the codec's reference chain. When input
+                     // is behind, avoid transferring/converting intermediate outputs.
+                     // The first, periodic and queue-tail frames still publish normally.
+@@ -988,7 +993,7 @@
+                     {
+                         std::lock_guard lock(mutex);
+                         const auto now=mediaClockMs();
+-                        defer=!replayed && !damaged && mediaPublishAllowed(currentGeneration,generation.load(),
++                        defer=!nativeVaapi && !replayed && !damaged && mediaPublishAllowed(currentGeneration,generation.load(),
+                                                               currentRecovery,recovery.load()) &&
+                             deferDecodedOutput(queue.size(),now-unit.enqueuedMs,streamFps,
+                                                now,lastPublishedMs);
+@@ -1007,7 +1012,7 @@
+ #ifdef __SWITCH__
+                     const bool download = frame->format == AV_PIX_FMT_NVTEGRA && !nativeOutput.load();
+ #else
+-                    const bool download = frame->format == AV_PIX_FMT_VAAPI;
++                    const bool download = frame->format == AV_PIX_FMT_VAAPI && !nativeVaapi;
+ #endif
+                     if (download) {
+                         av_frame_unref(cpu);
+@@ -1058,18 +1063,21 @@
+                         p.height = source->height;
+                         bool converted=false;
+ #ifdef __SWITCH__
+-                        if(nativeOutput.load() && frame->format==AV_PIX_FMT_NVTEGRA) {
+-                            // receive_frame has run NVTEGRA's post_process wait;
+-                            // retain the original surface until the display fence.
++                        if(nativeOutput.load() && frame->format==AV_PIX_FMT_NVTEGRA)
++#else
++                        if(nativeVaapi)
++#endif
++                        {
++                            // Pin the original decoder surface until presentation.
++                            // Linux synchronizes VAAPI before exporting the DMA-BUF.
+                             auto *reference=av_frame_clone(frame);
+                             if(reference) {
+                                 p.hardwareFrame=std::shared_ptr<const AVFrame>(reference,[](const AVFrame *value) {
+                                     auto *mutableFrame=const_cast<AVFrame *>(value);av_frame_free(&mutableFrame);
+                                 });
+                                 p.pixelFormat=SDL_PIXELFORMAT_NV12;converted=true;
+-                            }
++                            } else nativeOutput.store(false);
+                         } else
+-#endif
+                         {
+                             // Keep 8-bit limited-range 4:2:0 on the CPU side. The
+                             // native SDL shader performs colour conversion. This
+--- a/media.cpp
++++ b/media.cpp
+@@ -366,6 +366,23 @@
+     }
+ 
+     std::atomic<bool> yuvOutput{false}, nativeOutput{false};
++    std::atomic<Uint32> frameWakeEvent{0}, frameWakeWindow{0};
++    std::atomic<bool> frameWakePending{false};
++    void notifyFrame(uint64_t epoch) {
++        const Uint32 type=frameWakeEvent.load();
++        if(!type || generation.load()!=epoch || frameWakePending.exchange(true))return;
++        if(frameWakeEvent.load()!=type || generation.load()!=epoch) {
++            frameWakePending.store(false);return;
++        }
++        // Only the decoder thread produces this private event. The queue check
++        // also bounds notifications when picture() is polled without pumping SDL.
++        if(SDL_HasEvent(type))return;
++        SDL_Event event{};
++        event.type=type;event.user.windowID=frameWakeWindow.load();
++        // SDL filters/watchers may call back into Media. Never hold mutex here.
++        // A late close/reset notification contains no pointer or owned payload.
++        if(SDL_PushEvent(&event)!=1)frameWakePending.store(false);
++    }
+     std::atomic<uint64_t> cpuTransfers{0},nativePublished{0};
+     bool stop = false, clear = false;
+     std::thread thread;
+@@ -443,12 +460,15 @@
+       }
+     }
+     ~Impl() {
++        const Uint32 wakeType=frameWakeEvent.exchange(0);
++        frameWakePending.store(false);
+         {
+             std::lock_guard lock(mutex);
+             stop = true;
+         }
+         cv.notify_one();
+         thread.join();
++        if(wakeType)SDL_FlushEvent(wakeType);
+         if (audioDevice)
+             SDL_CloseAudioDevice(audioDevice);
+         opus_decoder_destroy(opus);
+@@ -905,7 +925,7 @@
+                     recvNs+=std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                frameReceived-receiveStarted).count();
+                     const auto disposition=classifyReceiveResult(receiveResult,AVERROR(EAGAIN),AVERROR_EOF);
+-                    bool replayed=false, published=false;
++                    bool replayed=false, published=false, frameReady=false;
+                     if(disposition==ReceiveDisposition::Eof) {
+                         if(!receiveEofLogged) {
+                             char message[96];
+@@ -1153,11 +1173,13 @@
+                                         ++presentationSkipped;
+                                     } else {
+                                         pushPlayout(std::move(p));
++                                        frameReady=!ready.empty();
+                                     }
+-                                } else latest = std::move(p);
++                                } else {latest = std::move(p);frameReady=true;}
+                             }
+                         }
+                     }
++                    if(frameReady)notifyFrame(currentGeneration);
+                     if(published && deferredReady) {
+                         av_frame_unref(deferred);deferredReady=false;
+                     }
+@@ -1375,6 +1397,9 @@
+     impl_->ingestAudio(data, size, timestamp);
+ }
+ Picture Media::picture(uint64_t after, int presentationLeadMs) {
++    // Ack before reading the queue: a concurrent later publication may wake us
++    // again, while an earlier publication is included in this picture() read.
++    if(impl_->frameWakeEvent.load())impl_->frameWakePending.store(false);
+     std::lock_guard lock(impl_->mutex);
+     (void)presentationLeadMs;
+     if(impl_->pacing)
+@@ -1383,6 +1408,19 @@
+ }
+ void Media::setYuvOutput(bool enabled) { impl_->yuvOutput.store(enabled); }
+ void Media::setNativeOutput(bool enabled) { impl_->nativeOutput.store(enabled); }
++void Media::setFrameWake(Uint32 eventType, Uint32 windowId) {
++    if(eventType && impl_->frameWakeEvent.load()==eventType && impl_->frameWakeWindow.load()==windowId) {
++        // A renderer reset only acknowledges the hint. Keep registration live
++        // so a concurrent publication cannot fall into a disable/re-enable gap.
++        impl_->frameWakePending.store(false);return;
++    }
++    const Uint32 previous=impl_->frameWakeEvent.exchange(0);
++    impl_->frameWakePending.store(false);
++    if(previous)SDL_FlushEvent(previous);
++    impl_->frameWakeWindow.store(windowId);
++    if(eventType>=SDL_USEREVENT && eventType<SDL_LASTEVENT)
++        impl_->frameWakeEvent.store(eventType);
++}
+ void Media::setTargetFps(int fps) {
+     std::lock_guard lock(impl_->mutex);
+     impl_->streamFps=std::clamp(fps,30,maxCaptureFps);
+@@ -1413,6 +1451,7 @@
+         // No codec wait, file I/O or image conversion under the shared lock.
+         diagnosticDump=impl_->takeDiagnostics();
+         impl_->generation.fetch_add(1);
++        impl_->frameWakePending.store(false);
+         ++impl_->recovery;
+         impl_->auDump_.clear();
+         impl_->auCount_ = 0;
+--- a/include/media.hpp
++++ b/include/media.hpp
+@@ -87,6 +87,9 @@
+     void setPlayoutDelay(int milliseconds);
+     void setYuvOutput(bool enabled);
+     void setNativeOutput(bool enabled);
++    // Optional private SDL hint for the render thread. Zero disables it.
++    // Caller owns the registered type; events carry only type/windowID.
++    void setFrameWake(Uint32 eventType, Uint32 windowId);
+     void reset();
+     void setVolume(int percent);
+     std::string status();

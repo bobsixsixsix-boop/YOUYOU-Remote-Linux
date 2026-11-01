@@ -25,7 +25,9 @@ fn invalid(detail: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, detail)
 }
 
-fn state_dir() -> io::Result<PathBuf> {
+/// Resolve the account directory without creating files, changing the working
+/// directory, or opening an account.
+pub fn state_dir() -> io::Result<PathBuf> {
     let absolute_env = |name| {
         env::var_os(name)
             .map(PathBuf::from)
