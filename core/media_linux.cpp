@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <fcntl.h>
 #include <linux/videodev2.h>
 #include <map>
@@ -82,18 +83,31 @@ int openDecoder(uint32_t fourcc) {
 }
 
 // Hand-off between the decoder thread and the player. One Media per process.
+// Up to QUEUED pictures wait, oldest first: the frame pacer (YY_PACE) shows each
+// of them; without it the player takes the newest and the rest go back.
+constexpr size_t QUEUED = 3;
 struct Slot {
     std::mutex mutex;
     std::condition_variable cv;
     uint64_t epoch = 0, serial = 0;
-    bool ready = false;
-    yy_frame frame{};              // newest unclaimed picture, fd unset
+    std::deque<yy_frame> ready;    // unclaimed pictures, fd unset
     std::vector<int> exported;     // one DMA-BUF per CAPTURE buffer of this epoch
     std::vector<uint32_t> returned; // released by the player, for the decoder thread to queue
     int wake = -1;
 };
 // Never destroyed: the player's threads may still wait on it while the process exits.
 Slot &slot = *new Slot;
+
+// Lends ready[at] and gives the older pictures back to the decoder. Holds slot.mutex.
+int lend(yy_frame *out, size_t at) {
+    for (size_t i = 0; i < at; ++i) slot.returned.push_back(slot.ready[i].index);
+    *out = slot.ready[at];
+    slot.ready.erase(slot.ready.begin(), slot.ready.begin() + at + 1);
+    out->fd = out->index < slot.exported.size() ? fcntl(slot.exported[out->index], F_DUPFD_CLOEXEC, 0) : -1;
+    if (out->fd < 0) slot.returned.push_back(out->index);
+    if (at || out->fd < 0) wake(slot.wake);
+    return out->fd >= 0;
+}
 } // namespace
 
 namespace uu {
@@ -291,7 +305,7 @@ struct Media::Impl {
     void retire() {
         std::lock_guard lock(slot.mutex);
         ++slot.epoch;
-        slot.ready = false;
+        slot.ready.clear();
         for (const int e : slot.exported) close(e);
         slot.exported.clear();
         slot.returned.clear();
@@ -426,8 +440,8 @@ struct Media::Impl {
         visibleHeight = std::min(visible.height ? visible.height : UINT32_MAX, f.fmt.pix_mp.height);
         v4l2_control minimum{};
         minimum.id = V4L2_CID_MIN_BUFFERS_FOR_CAPTURE;
-        // +4: one in the slot, up to two held by the player, one spare.
-        r.count = (xioctl(fd, VIDIOC_G_CTRL, &minimum) ? 4 : minimum.value) + 4;
+        // +6: up to three waiting in the slot, two held by the player, one spare.
+        r.count = (xioctl(fd, VIDIOC_G_CTRL, &minimum) ? 4 : minimum.value) + QUEUED + 3;
         if (xioctl(fd, VIDIOC_REQBUFS, &r)) return fail("REQBUFS capture");
         std::vector<int> exported;
         for (uint32_t i = 0; i < r.count; ++i) {
@@ -483,9 +497,11 @@ struct Media::Impl {
         int64_t displaced = -1;
         {
             std::lock_guard lock(slot.mutex);
-            if (slot.ready) displaced = slot.frame.index;
-            slot.frame = {-1, visibleWidth, visibleHeight, stride, uvOffset, index, slot.epoch, ++slot.serial, now};
-            slot.ready = true;
+            slot.ready.push_back({-1, visibleWidth, visibleHeight, stride, uvOffset, index, slot.epoch, ++slot.serial, now});
+            if (slot.ready.size() > QUEUED) {
+                displaced = slot.ready.front().index;
+                slot.ready.pop_front();
+            }
         }
         slot.cv.notify_all();
         if (displaced >= 0) queueCapture(uint32_t(displaced));
@@ -703,17 +719,12 @@ uint64_t Media::keyframeCount() { return impl_->keyframes.load(); }
 
 extern "C" int yy_frame_acquire(yy_frame *out) {
     std::lock_guard lock(slot.mutex);
-    if (!out || !slot.ready) return 0;
-    const auto index = slot.frame.index;
-    *out = slot.frame;
-    out->fd = index < slot.exported.size() ? fcntl(slot.exported[index], F_DUPFD_CLOEXEC, 0) : -1;
-    slot.ready = false;
-    if (out->fd < 0) {
-        slot.returned.push_back(index);
-        wake(slot.wake);
-        return 0;
-    }
-    return 1;
+    return out && !slot.ready.empty() ? lend(out, slot.ready.size() - 1) : 0;
+}
+extern "C" int yy_frame_next(yy_frame *out) {
+    std::lock_guard lock(slot.mutex);
+    const int waiting = int(slot.ready.size());
+    return out && waiting && lend(out, 0) ? waiting : 0;
 }
 extern "C" void yy_frame_release(const yy_frame *frame) {
     std::lock_guard lock(slot.mutex);
@@ -724,8 +735,8 @@ extern "C" void yy_frame_release(const yy_frame *frame) {
 extern "C" uint64_t yy_frame_wait(uint64_t serial, int timeout_ms) {
     std::unique_lock lock(slot.mutex);
     return slot.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-                            [&] { return slot.ready && slot.frame.serial > serial; })
-               ? slot.frame.serial
+                            [&] { return !slot.ready.empty() && slot.ready.back().serial > serial; })
+               ? slot.ready.back().serial
                : 0;
 }
 // No session needed: the player's clip self-test feeds the decoder directly.

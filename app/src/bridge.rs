@@ -25,6 +25,7 @@ extern "C" {
     fn yy_snapshot() -> *mut c_char;
     fn yy_free(text: *mut c_char);
     fn yy_frame_acquire(out: *mut RawFrame) -> c_int;
+    fn yy_frame_next(out: *mut RawFrame) -> c_int;
     fn yy_frame_release(frame: *const RawFrame);
     fn yy_frame_wait(serial: u64, timeout_ms: c_int) -> u64;
     fn yy_debug_video(data: *const c_void, size: usize, hevc: c_int);
@@ -86,6 +87,12 @@ impl Frame {
     pub fn acquire() -> Option<Self> {
         let mut raw = RawFrame::default();
         (unsafe { yy_frame_acquire(&mut raw) } == 1).then_some(Self(raw))
+    }
+    /// The oldest picture nobody has taken yet, and how many were waiting, it included.
+    pub fn next() -> Option<(Self, i32)> {
+        let mut raw = RawFrame::default();
+        let waiting = unsafe { yy_frame_next(&mut raw) };
+        (waiting > 0).then_some((Self(raw), waiting))
     }
 }
 

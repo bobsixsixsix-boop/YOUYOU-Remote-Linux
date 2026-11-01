@@ -27,7 +27,7 @@ const USAGE: &str = "用法：
   youyou connect [电脑名或设备 ID]       直接全屏串流（默认第一台在线的电脑）
   youyou play <片段.h264|.hevc> [帧率]   不联网的解码与显示自测（默认 120 帧）
   youyou import-apk <官方电视版 APK> | import-key <signing.key> | download-key
-环境变量：YY_VSYNC=1 开垂直同步（默认关）；YY_TOUCH=mouse|touch、YY_DESKTOP=1|0 临时盖过界面里的触屏和专用桌面设置；
+环境变量：YY_VSYNC=1 开垂直同步（默认关）；YY_PACE=1 开帧节奏器（含垂直同步）；YY_TOUCH=mouse|touch、YY_DESKTOP=1|0 临时盖过界面里的触屏和专用桌面设置；
   connect 时 YY_STREAM=2560x1600@120、YY_MBPS=60 临时改串流尺寸、帧率和码率上限";
 const TOUCH_MOUSE: u32 = u32::MAX; // SDL_TOUCH_MOUSEID: mouse events synthesized from touch
 /// A touch starting this close to the left or right edge (dp) and moving this far in opens the menu.
@@ -209,6 +209,8 @@ struct Screen {
     mouse: sdl2::mouse::MouseUtil,
     events: sdl2::EventSubsystem,
     frame_ready: u32,
+    /// Frame pacer: every picture in order, one per refresh.
+    pace: bool,
     controllers: Option<sdl2::GameControllerSubsystem>,
     pad: Option<GameController>,
     _video: sdl2::VideoSubsystem,
@@ -239,7 +241,8 @@ impl Screen {
         // Off by default: KWin still flips on vblank (no tearing) and pacing is the same
         // either way, but at 120 fps on 120 Hz swap interval 1 holds each picture one
         // more refresh (tools/results/20261102-pacing.txt).
-        let vsync = std::env::var("YY_VSYNC").is_ok_and(|v| v == "1");
+        let pace = std::env::var("YY_PACE").is_ok_and(|v| v == "1");
+        let vsync = pace || std::env::var("YY_VSYNC").is_ok_and(|v| v == "1");
         video.gl_set_swap_interval(if vsync { SwapInterval::VSync } else { SwapInterval::Immediate })?;
         let renderer = video::Renderer::new(&video)?;
         let ui = ui::Ui::new(&video)?;
@@ -270,6 +273,7 @@ impl Screen {
             mouse: sdl.mouse(),
             events,
             frame_ready,
+            pace,
             controllers: sdl.game_controller().ok(),
             pad: None,
             _video: video,
@@ -418,6 +422,10 @@ fn stream(screen: &mut Screen, core: Option<&Core>, device: &Value, prefs: &mut 
     // A touch that started at a screen edge: never sent to the host, it may open the menu.
     let mut edge: Option<((i64, i64), f32)> = None;
     let mut combo = (false, false); // the pad's Select and Start held
+    let mut backlog = false; // pictures still waiting for the pacer
+    // How many were waiting at each of the pacer's last takes, half a second of refreshes.
+    let mut history = std::collections::VecDeque::new();
+    let half = screen.window.display_mode().map_or(60, |m| (m.refresh_rate / 2).max(1) as usize);
     loop {
         let stage = snap["stage"].as_str().unwrap_or("").to_string();
         let waiting = core.is_some() && (shown.is_none() || stage == "reconnecting");
@@ -432,6 +440,7 @@ fn stream(screen: &mut Screen, core: Option<&Core>, device: &Value, prefs: &mut 
         let local = |x: i32, y: i32| (x as f32 / w as f32, y as f32 / h as f32);
         let (mut fresh, mut pointer, mut pad_moved) = (false, None, false);
         let timeout = match (overlay, screen.ui.dirty, screen.ui.animating) {
+            _ if backlog => 0,
             (true, true, _) => 0,
             (true, _, true) => 8,
             _ => 100,
@@ -586,14 +595,35 @@ fn stream(screen: &mut Screen, core: Option<&Core>, device: &Value, prefs: &mut 
             snap = s;
         }
 
-        // Newest picture only: whatever the decoder finished while we waited
-        // for the last swap was superseded and has already gone back to it.
+        // Without the pacer, the newest picture only: whatever the decoder finished
+        // while we waited for the last swap was superseded and goes back to it.
+        // The pacer takes the oldest; swap interval 1 holds each for one refresh.
+        // As Moonlight's pacer, it keeps the backlog while it comes and goes, and
+        // catches up to the newest once none of the last half second's takes found
+        // a single picture waiting: a backlog that stays only adds latency.
         let mut previous = None;
-        if fresh {
-            if let Some(frame) = Frame::acquire() {
-                previous = Some(shown.replace(frame));
-                redraw = true;
+        let next = if !screen.pace {
+            fresh.then(Frame::acquire).flatten()
+        } else if fresh || backlog {
+            let catch_up = history.len() == half && history.iter().all(|&w| w > 1);
+            let mut next = Frame::next();
+            while catch_up && next.as_ref().is_some_and(|(_, waiting)| *waiting > 1) {
+                next = Frame::next();
             }
+            if let Some((_, waiting)) = next {
+                if history.len() == half {
+                    history.pop_front();
+                }
+                history.push_back(waiting);
+            }
+            backlog = next.as_ref().is_some_and(|(_, waiting)| *waiting > 1);
+            next.map(|(frame, _)| frame)
+        } else {
+            None
+        };
+        if let Some(frame) = next {
+            previous = Some(shown.replace(frame));
+            redraw = true;
         }
         if !redraw && !(overlay && (screen.ui.dirty || screen.ui.animating)) {
             continue;

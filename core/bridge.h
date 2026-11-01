@@ -34,6 +34,9 @@ typedef struct yy_frame {
 /* Newest picture not taken yet (1), or none (0). Pictures nobody took in
  * time go back to the decoder: the player always gets the newest. */
 int yy_frame_acquire(yy_frame *out);
+/* Oldest picture not taken yet, for the frame pacer: how many were waiting,
+ * this one included, or 0. Beyond three the oldest go back to the decoder. */
+int yy_frame_next(yy_frame *out);
 /* Give the buffer back once it is no longer on screen. */
 void yy_frame_release(const yy_frame *frame);
 /* Wait until a picture newer than `serial` is ready: its serial, or 0 on timeout. */
