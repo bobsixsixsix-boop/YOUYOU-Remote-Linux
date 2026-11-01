@@ -3,6 +3,7 @@
  * Strings are UTF-8. Calls that can fail return -1 (or NULL) and leave the
  * reason in yy_error(), valid until the next failing call on that thread. */
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -35,8 +36,10 @@ typedef struct yy_frame {
 int yy_frame_acquire(yy_frame *out);
 /* Give the buffer back once it is no longer on screen. */
 void yy_frame_release(const yy_frame *frame);
-/* Wait until a picture newer than `serial` is ready (1) or timeout (0). */
-int yy_frame_wait(uint64_t serial, int timeout_ms);
+/* Wait until a picture newer than `serial` is ready: its serial, or 0 on timeout. */
+uint64_t yy_frame_wait(uint64_t serial, int timeout_ms);
+/* Self-test without a session (youyou play): one Annex-B access unit per call. */
+void yy_debug_video(const void *data, size_t size, int hevc);
 
 #ifdef __cplusplus
 }

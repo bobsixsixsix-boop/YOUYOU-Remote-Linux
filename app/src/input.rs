@@ -1,3 +1,6 @@
+//! UU input protocol: SDL events to the JSON actions upstream Client::input sends.
+//! Carried over from the 0.1.x player (reviewed 2026-11-02); the wire format is in
+//! core/upstream/source/client.cpp (Client::input).
 use sdl2::{
     controller::{Axis, Button, GameController},
     keyboard::Scancode,

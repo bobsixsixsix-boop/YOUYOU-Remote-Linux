@@ -1,0 +1,19 @@
+[package]
+name = "youyou"
+version = "0.2.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "UU Remote client for Linux tablets (Lenovo Legion Y700)"
+
+# Standalone until the old Codex workspace at the repository root is removed.
+[workspace]
+
+[dependencies]
+youyou-account = { path = "../account" }
+glow = "0.16"
+libc = "0.2"
+sdl2 = "0.38"
+serde_json = "1"
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,32 @@
+What reaches the panel: tools/pacing-run.sh on the Y700, 2026-11-02.
+`youyou play long-2560.hevc 120` (HEVC 2560x1600, 2880 pictures, fed at 120 fps
+by the player's own thread), fullscreen on the real KWin session (3040x1904
+landscape). ml-flips.py counts KWin page flips (drm_vblank_event_delivered) for
+15 s from t+5 s; "interval" is in panel refreshes: 1 = a new picture every
+refresh, 2 = a picture held for two.
+
+panel  vsync | flips/s | interval 1 | interval 2 | 1 % low | 0.1 % low | player: shown/2880, decoder->swap p50/p95
+164 Hz   on  |  120.0  |  63.48 %   |  36.35 %   |  75.4   |  54.7     | 2876, 0.5 / 0.7 ms
+164 Hz   off |  120.1  |  63.37 %   |  36.63 %   |  82.0   |  82.0     | 2876, 0.5 / 0.7 ms
+120 Hz   on  |  119.9  |  99.89 %   |   0.11 %   | 107.4   |  60.0     | 2869, 11.8 / 14.1 ms
+120 Hz   off |  120.0  |  99.94 %   |   0.06 %   | 113.3   |  60.0     | 2876, 0.5 / 0.9 ms
+
+- 164 Hz: 164/120 does not divide, so every second 44 pictures stay two
+  refreshes (12.2 ms) and the rest one (6.1 ms), evenly spread ("phase
+  repeats" 44 in each second). This is judder from the rate mismatch, the
+  same with or without vsync; no player can fix it at 164 Hz.
+- 120 Hz: one picture per refresh. Vsync changes nothing on screen but makes
+  SDL's swap wait for the previous frame callback, so each picture leaves the
+  player one refresh later (11.8 ms instead of 0.5 ms). Hence vsync off by
+  default. No tearing: SDL2 2.32 has no wp_tearing_control, KWin flips on vblank.
+- Colours (probe at frames 60/300, HEVC test clip) identical in all four runs.
+- bars-1080.h264 regenerated with -bf 0 (x264 B-frames made the earlier clip
+  arrive out of display order): 356/360 shown on 164 Hz, SMPTE bars
+  [187,189,189] [188,190,0] [0,190,187] [0,189,0] [188,0,189] [188,0,0] [0,0,188]
+  = 75 % bars, BT.709 limited range decoded correctly (ideal 191/0).
+- No new dpu "vblank timeout" in dmesg from the eight mode switches.
+
+Local playback is perfectly paced by the feeder; over a network pictures arrive
+bunched. Moonlight on the same tablet needed frame pacing (99.67 % vs 91.2 %
+interval 1, y700 README "开 frame pacing") and a CPU floor (uclamp.min 512) for
+that. To be measured the same way with a real stream (README, step 5).

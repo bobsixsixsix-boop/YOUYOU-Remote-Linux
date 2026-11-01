@@ -7,6 +7,101 @@
 - 感谢 **Antman2023** 开发最初的 Switch 原生客户端，打通扫码和短信登录、设备列表、WebRTC 音视频与手柄输入，让自制客户端能直接连接原版 Windows 电脑端。[UURemote-ns](https://github.com/Antman2023/UURemote-ns)
 - 感谢 **doke69** 在这个基础上改进设备首页和串流菜单，扩展 H.265 播放、手柄与多点触控、画质设置和网络诊断。Y700 的设备卡与手柄导航由这套界面移植而来。本项目使用其 0.3.74 Beta 代码作为直接上游。[YOUYOU-Remote-ns](https://github.com/doke69/YOUYOU-Remote-ns/blob/ba4d7f9f8f87f4a47e4d872db3dd0ca526718f8b/README.md) · [上游致谢](https://github.com/doke69/YOUYOU-Remote-ns/blob/ba4d7f9f8f87f4a47e4d872db3dd0ca526718f8b/docs/credits.md)
 
+## v0.2 重写（开发中，未发布）
+
+> 本节之后的「安装与登录」到「许可与资源」描述的仍是已发布的 v0.1.15。v0.2 做完前不发版，旧代码也先不删。
+
+v0.1.15 把上游的 Switch 程序整个移植成一个 Linux 程序，再在里面补 Linux 的显示和输入，层次混在一起，画面要回 CPU 转格式，指针也跟手慢。v0.2 只保留上游的协议核心，播放器、界面、输入、打包都重写。
+
+### 结构
+
+| 路径 | 是什么 |
+| --- | --- |
+| `core/upstream/` | doke69/YOUYOU-Remote-ns v0.3.74-beta（`ba4d7f9`）的 git subtree，**原样不改**。依赖由它自己的 `scripts/fetch_deps.py` 和 `patch_deps.py` 按哈希拉取、打补丁。 |
+| `core/CMakeLists.txt` | 把上游的登录、信令、WebRTC 和 Opus 音频，加上下面两个文件，编成 `libyouyou_core.so`。`youyou_core.map` 让它只导出 `yy_*`。 |
+| `core/bridge.h`、`bridge.cpp` | 给 Rust 用的 C 接口：`yy_open/close`、`yy_command`（直接转给上游 `Client::command`）、`yy_snapshot`（JSON 状态）、`yy_frame_acquire/release/wait`，以及自测用的 `yy_debug_video`。 |
+| `core/media_linux.cpp` | Linux 媒体层：把收到的访问单元直接送进 V4L2 有状态解码器（高通 iris），用 `VIDIOC_EXPBUF` 把解出的 NV12 缓冲作为 DMA-BUF 借给播放器。CPU 不碰像素。 |
+| `core/tests/decode_test.cpp` | 解码自测：整段、重置后、从 GOP 中间开始，三种情况都要出画面。 |
+| `app/` | Rust 播放器 `youyou`（独立的 Cargo 工程，旧的根 workspace 删掉后再并回）。 |
+| `app/src/bridge.rs` | C 接口的封装。`Core` 拿着账号锁，drop 时先 `yy_close` 再放锁；`Frame` drop 时关 fd 并还缓冲。 |
+| `app/src/video.rs` | 零拷贝显示：每个解码缓冲导入成两张 EGLImage（亮度 R8、色度 GR88），着色器里做 YUV→RGB；`fit` 算黑边。 |
+| `app/src/input.rs` | 触屏、鼠标、键盘、手柄到 UU 输入协议的映射（来自 v0.1.15，已审过，3 个单测）。 |
+| `app/src/clip.rs` | `youyou play` 用：把 Annex-B 文件切成访问单元。 |
+| `app/src/main.rs` | 命令行入口、SDL 窗口与事件循环、统计。 |
+| `account/` | 账号材料（APK 提取签名、client-id、单实例锁），v0.2 直接复用。 |
+| `tools/` | `decbench.c`、`v4l2bench.c`（解码延迟对比）、`pacing-run.sh`（上屏节奏），结果在 `tools/results/`。 |
+
+根目录的 `src/`、`native/`、`player/`、`build.rs`、`Cargo.toml`、`packaging/`、`integrations/` 是 v0.1.15，v0.2 做完后删除。
+
+### 现在能做什么
+
+```sh
+youyou devices                  # 用已保存的登录列出电脑（扫码界面还没做）
+youyou connect [电脑名或设备 ID]  # 全屏串流
+youyou play clip.hevc [帧率]     # 不联网：解码并全屏显示一段 H.264/HEVC，打印统计
+```
+
+界面做好前的临时开关：`YY_VSYNC=1` 开垂直同步（默认关），`YY_TOUCH=mouse` 把触屏当鼠标。
+
+### 在 Y700 上构建
+
+```sh
+# 一次：sudo apt install build-essential cmake ninja-build pkg-config python3 cargo rustc libsdl2-dev libopus-dev libcurl4-openssl-dev libegl-dev libgles-dev
+(cd core/upstream && python3 -I scripts/fetch_deps.py && python3 -I scripts/patch_deps.py)
+cmake -S core -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DYY_TESTS=ON
+cmake --build build
+(cd app && YY_CORE_LIB_DIR=../build cargo build --release && cp ../build/libyouyou_core.so target/release/)
+(cd app && LD_LIBRARY_PATH=../build cargo test --release)
+```
+
+`youyou` 通过 rpath `$ORIGIN` 找同目录的 `libyouyou_core.so`。
+
+### 实现要点
+
+- **解码**：直接用 V4L2，不走 FFmpeg 或 VA-API。同样的片子，从送进去到能显示（p50）：HEVC 2560×1600 4.5 ms 对 VA-API 12.1 ms，HEVC 1080p 3.7 对 7.6（`tools/results/20261102-decode-latency.txt`）。丢包或积压时跟上游一样，丢到下一个随机访问点并请求关键帧。HEVC 的 CRA 也算随机访问点，因为 x265 的周期关键帧就是 CRA。
+- **交给播放器**：只留最新的一帧。播放器没来得及取的帧直接还给解码器。节奏由播放器管，因为只有它知道屏幕什么时候刷新。`yy_frame_wait` 让播放器的唤醒线程睡到有新帧为止，不轮询。
+- **显示**：解码缓冲按缓冲号导入一次，之后复用；解码器重新初始化（`epoch` 变了）时全部释放。导入**必须**带显式的 `DRM_FORMAT_MOD_LINEAR` modifier，原因见下面「踩过的坑」。颜色矩阵在自己的着色器里做（BT.709 有限范围），不依赖驱动的 YUV 采样。
+- **输入**：指针移动在一轮事件里合并成一次，按键、按钮、滚轮之前先发掉，所以不会积压。上游把输入放进队列，工作线程最多等 4 ms。协议里只有绝对坐标（`mouse_move_absolute`），没有相对鼠标。
+- **垂直同步默认关**（`tools/results/20261102-pacing.txt`）：开和关上屏节奏完全一样，因为 KWin 总是在 vblank 翻页。面板 120 Hz 时，开着会让每帧晚一个刷新才离开播放器：出解码器→交换完成 11.8 ms，关着是 0.5 ms。SDL2 2.32 没实现 Wayland 的撕裂协议，所以关了也不撕裂。
+
+### 实测（Y700，HEVC 2560×1600，120 帧，本地片段）
+
+| 面板 | 一帧一刷 | 一帧停两刷 | 1 % low |
+| --- | --- | --- | --- |
+| 164 Hz | 63.4 % | 36.6 %（每秒 44 次，均匀分布） | 75–82 fps |
+| 120 Hz | 99.9 % | 0.06–0.11 % | 107–113 fps |
+
+164 不是 120 的整数倍，所以在 164 Hz 面板上放 120 帧必然一抖一抖。这跟播放器无关，换什么播放器都一样。要顺，面板刷新率必须是串流帧率的整数倍：120 帧配 120 Hz，144 帧配 144 Hz。
+
+### 踩过的坑（根因）
+
+- **EGL 导入报 `EGL_BAD_ALLOC`**（Mesa 26 freedreno，Adreno 840）：
+  - 不带 modifier（即 `DRM_FORMAT_MOD_INVALID`）时，按单张 NV12 导入或按 R8/GR88 分平面导入都会被拒。
+  - 显式传 `EGL_DMA_BUF_PLANE0_MODIFIER_LO/HI_EXT = 0`（LINEAR）就好了。
+  - 按单张 NV12 导入还有第二个问题：Mesa 会把它拆成 `r8_g8b8_420` 两个平面，960×540 的色度平面被拒。所以用两张图。
+  - 导出时用 `O_RDONLY` 就够了，`O_RDWR` 试过，不是原因。
+- **退出时 abort（`std::system_error: Invalid argument`）**：静态的 `uu::Media` 和帧槽在 `exit()` 析构时，别的线程还在用它们。两者都改成故意不析构（`*new`）。
+- **iris 的可见尺寸**：要在 `S_FMT` 之前读 CAPTURE 的 crop。之后 iris 会把 crop 重置成编码尺寸（1080 变 1088）。
+- **自测片段有 B 帧**：x264 的 `-preset fast` 会加 B 帧，播放器看到的帧序就不是显示序，统计成跳帧 25 %。测试片要加 `-bf 0`。真实串流没有 B 帧。
+
+### 有意不做 / 暂时偷懒
+
+- **播放器不自己切屏幕刷新率**：Wayland 没有让普通程序改显示模式的协议。面板配哪个刷新率由系统决定，上面的表说明了该怎么配。Y700 上由 y700 项目的刷新率守护来管，不写进这里，因为本项目不放个人定制。
+- **只按 BT.709 有限范围转色**：UU 主机发的就是这个。哪天主机发别的，再读码流的 VUI（V4L2 colorspace）。
+- **没有相对鼠标**：协议里没有。
+- **还没有本地退出手势**：现在只能 Ctrl+C 或关窗口；菜单在第 6 步。
+- **还没有登录界面**：要先有保存的登录（`session.json`）。
+
+### 进度
+
+- [x] 1. 上游原样在 Linux 上编通（subtree + 自己的 CMake）
+- [x] 2. 核心库 C 接口 + V4L2 零拷贝媒体层，解码自测
+- [x] 3. 审 v0.1.15 的补丁，只当参考
+- [x] 4. Rust 播放器：零拷贝上屏、颜色校验、节奏实测
+- [ ] 5. 真网络：连电脑，和 v0.1.15、Moonlight 用同一把尺子（`ml-flips.py`）比；看要不要像 Moonlight 那样加帧节奏器和 CPU 下限（uclamp.min）
+- [ ] 6. 界面：扫码/短信登录、设备页、串流菜单、设置（编码、分辨率、帧率、码率、虚拟屏、防窥）
+- [ ] 7. 边缘手势接入 y700-edge、deb 打包、删除 v0.1.15 代码、发布前完整 README
+
 ## 安装与登录
 
 在 Y700 上下载最新的 `arm64.deb` 安装包，进入只放这一版本安装包的目录后执行安装命令。[下载 ARM64 安装包](https://github.com/bobsixsixsix-boop/YOUYOU-Remote-Linux/releases/latest)

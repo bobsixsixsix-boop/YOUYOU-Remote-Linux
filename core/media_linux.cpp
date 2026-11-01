@@ -91,7 +91,9 @@ struct Slot {
     std::vector<int> exported;     // one DMA-BUF per CAPTURE buffer of this epoch
     std::vector<uint32_t> returned; // released by the player, for the decoder thread to queue
     int wake = -1;
-} slot;
+};
+// Never destroyed: the player's threads may still wait on it while the process exits.
+Slot &slot = *new Slot;
 } // namespace
 
 namespace uu {
@@ -719,8 +721,15 @@ extern "C" void yy_frame_release(const yy_frame *frame) {
     slot.returned.push_back(frame->index);
     wake(slot.wake);
 }
-extern "C" int yy_frame_wait(uint64_t serial, int timeout_ms) {
+extern "C" uint64_t yy_frame_wait(uint64_t serial, int timeout_ms) {
     std::unique_lock lock(slot.mutex);
     return slot.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-                            [&] { return slot.ready && slot.frame.serial > serial; });
+                            [&] { return slot.ready && slot.frame.serial > serial; })
+               ? slot.frame.serial
+               : 0;
+}
+// No session needed: the player's clip self-test feeds the decoder directly.
+extern "C" void yy_debug_video(const void *data, size_t size, int hevc) {
+    static auto &media = *new uu::Media; // never destroyed, as the feeding thread outlives exit()
+    media.video(static_cast<const uint8_t *>(data), size, media.generation(), std::nullopt, hevc != 0);
 }

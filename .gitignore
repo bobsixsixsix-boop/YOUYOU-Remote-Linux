@@ -3,6 +3,7 @@
 /vendor/
 /account/target/
 /player/target/
+/app/target/
 *.apk
 signing.key
 client-id
