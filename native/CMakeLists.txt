@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(youyou_core VERSION 0.1.12 LANGUAGES C CXX)
+project(youyou_core VERSION 0.1.13 LANGUAGES C CXX)
 set(UU_UPSTREAM "" CACHE PATH "Prepared source directory from native/prepare.py")
 if(NOT EXISTS "${UU_UPSTREAM}/external/libdatachannel/deps/libsrtp/.fetched")
     message(FATAL_ERROR "First run python3 native/prepare.py --output <directory> and set -DUU_UPSTREAM=<directory>")

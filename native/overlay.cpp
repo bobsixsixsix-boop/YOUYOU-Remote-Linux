@@ -138,8 +138,8 @@ extern "C" int yy_ui_tick(void *p,int action,int x,int y,const char *value){
             case 1:in.toolbar=true;break; case 2:in.confirm=true;break; case 3:in.cancel=true;break;
             case 4:in.up=true;break;case 5:in.down=true;break;case 6:in.left=true;break;case 7:in.right=true;break;
             case 8:v.held=true;v.ui.pointer(true,x,y);break;
-            case 9:if(v.held)v.ui.pointer(true,x,y);v.held=false;v.ui.pointer(false,x,y);break;
-            case 10:if(v.held)v.ui.pointer(true,x,y);break;
+            case 9:if(v.held)v.ui.pointer(false,x,y);v.held=false;break;
+            case 10:if(v.held)v.ui.movePointer(x,y);break;
             case 11:{SDL_Event e{};e.type=SDL_TEXTINPUT;SDL_strlcpy(e.text.text,value,sizeof e.text.text);v.ui.event(e);break;}
             case 12:{SDL_Event e{};e.type=SDL_KEYDOWN;e.key.keysym.sym=SDLK_BACKSPACE;v.ui.event(e);break;}
             case 13:{SDL_Event e{};e.type=SDL_MOUSEWHEEL;e.wheel.y=y;v.ui.event(e);break;}
@@ -312,6 +312,17 @@ extern "C" int yy_ui_selftest(SDL_Renderer *renderer,const char *assets){
         if(!toolbar.isOnPage(tvui::Page::Disconnect))throw std::runtime_error("Disconnect confirmation missing");
         tap(toolbar,993,358);
         if(!toolbar.isOnPage(tvui::Page::Toolbar))throw std::runtime_error("Cancel disconnect failed");
+        tap(toolbar,1000,207);tap(toolbar,1000,207);
+        tap(toolbar,830,300); // Sheet padding belongs to the menu.
+        toolbar.pointer(true,790,310);toolbar.movePointer(900,310);toolbar.pointer(false,790,310);
+        toolbar.input({},state,false);
+        if(!toolbar.isOnPage(tvui::Page::Quality))throw std::runtime_error("Drag or padding dismissed the drawer");
+        tap(toolbar,420,300);
+        if(toolbar.active())throw std::runtime_error("Backdrop tap did not close the whole drawer");
+        tvui::LiveFrontend confirmClose(renderer,1);
+        tap(confirmClose,901,102); // Disconnect confirmation must be safe to dismiss.
+        tap(confirmClose,1204,58);
+        if(confirmClose.active())throw std::runtime_error("Close in confirmation did not dismiss the whole drawer");
         return 0;
     });
 }

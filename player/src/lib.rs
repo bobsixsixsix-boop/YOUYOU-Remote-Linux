@@ -10,6 +10,7 @@ pub use menu::{attach_upstream, menu_self_test, preview, Menu};
 use touch::{EdgeSwipe, Route, Touch};
 
 use input::{button, image_point, pad_state, vk, InputState};
+use menu::{MenuPointers, Pointer, PointerRoute, Press};
 use sdl2::{
     event::{Event, WindowEvent},
     keyboard::Scancode,
@@ -199,7 +200,7 @@ fn play_loop(
     let mut menu = session.menu(canvas)?;
     let mut fullscreen_button = fullscreen::Control::default();
     let mut menu_flags = 0;
-    let mut menu_contact = None;
+    let mut menu_pointers = MenuPointers::default();
     let mut edge_swipe = EdgeSwipe::default();
     let timer = sdl.timer()?;
     let mut menu_paint = Instant::now();
@@ -258,11 +259,12 @@ fn play_loop(
                 let next_control = status.can_control && status.streaming;
                 if streaming != status.streaming {
                     edge_swipe = EdgeSwipe::default();
-                    if menu_contact.take().is_some() {
+                    if menu_pointers.cancel() {
                         if let Some(ui) = &mut menu {
                             ui.tick(14, 0, 0, "")?;
                         }
                     }
+                    menu_pointers = MenuPointers::default();
                 } else if can_control != next_control {
                     edge_swipe.cancel_pending();
                 }
@@ -391,6 +393,26 @@ fn play_loop(
                 {
                     continue;
                 }
+                // SDL's mouse-to-touch and touch-to-mouse hints can change with
+                // the platform. Ignore emulated events even after a menu closes.
+                match &event {
+                    Event::FingerDown { touch_id: -1, .. }
+                    | Event::FingerUp { touch_id: -1, .. }
+                    | Event::FingerMotion { touch_id: -1, .. }
+                    | Event::MouseMotion {
+                        which: u32::MAX, ..
+                    }
+                    | Event::MouseButtonDown {
+                        which: u32::MAX, ..
+                    }
+                    | Event::MouseButtonUp {
+                        which: u32::MAX, ..
+                    }
+                    | Event::MouseWheel {
+                        which: u32::MAX, ..
+                    } => continue,
+                    _ => {}
+                }
                 let previous_pad = controllers.id();
                 let navigation = controllers.handle(&event);
                 if controllers.id() != previous_pad {
@@ -429,7 +451,7 @@ fn play_loop(
                             ..
                         }
                     ) {
-                        menu_contact = None;
+                        menu_pointers = MenuPointers::default();
                         ui.tick(14, 0, 0, "")?;
                     }
                     let captured = menu_flags & 1 != 0;
@@ -440,6 +462,67 @@ fn play_loop(
                             (p.1 * output.1 as f32).floor() as i32,
                         )
                     };
+                    let pointer = match &event {
+                        Event::MouseButtonDown {
+                            which,
+                            x,
+                            y,
+                            mouse_btn: sdl2::mouse::MouseButton::Left,
+                            ..
+                        } => Some((Pointer::Mouse(*which), Press::Down, local(*x, *y))),
+                        Event::MouseButtonUp {
+                            which,
+                            x,
+                            y,
+                            mouse_btn: sdl2::mouse::MouseButton::Left,
+                            ..
+                        } => Some((Pointer::Mouse(*which), Press::Up, local(*x, *y))),
+                        Event::MouseMotion { which, x, y, .. } => {
+                            Some((Pointer::Mouse(*which), Press::Move, local(*x, *y)))
+                        }
+                        Event::FingerDown {
+                            touch_id,
+                            finger_id,
+                            x,
+                            y,
+                            ..
+                        } => Some((
+                            Pointer::Finger(*touch_id, *finger_id),
+                            Press::Down,
+                            (*x, *y),
+                        )),
+                        Event::FingerUp {
+                            touch_id,
+                            finger_id,
+                            x,
+                            y,
+                            ..
+                        } => Some((Pointer::Finger(*touch_id, *finger_id), Press::Up, (*x, *y))),
+                        Event::FingerMotion {
+                            touch_id,
+                            finger_id,
+                            x,
+                            y,
+                            ..
+                        } => Some((
+                            Pointer::Finger(*touch_id, *finger_id),
+                            Press::Move,
+                            (*x, *y),
+                        )),
+                        _ => None,
+                    };
+                    if let Some((id, phase, point)) = pointer.filter(|_| focused) {
+                        match menu_pointers.route(id, phase, captured) {
+                            PointerRoute::Consume => continue,
+                            PointerRoute::Menu(a) => {
+                                let (x, y) = pos(point);
+                                menu_flags = ui.tick(a, x, y, "")?;
+                                redraw = true;
+                                continue;
+                            }
+                            PointerRoute::Remote => {}
+                        }
+                    }
                     let mut xy = (0, 0);
                     let mut txt = "";
                     let action = match &event {
@@ -450,64 +533,6 @@ fn play_loop(
                             ..
                         } => Some(1),
                         _ if navigation == Some(PadAction::Menu) => Some(1),
-                        Event::MouseButtonDown {
-                            which,
-                            x,
-                            y,
-                            mouse_btn: sdl2::mouse::MouseButton::Left,
-                            ..
-                        } if captured && *which != u32::MAX => {
-                            xy = pos(local(*x, *y));
-                            Some(8)
-                        }
-                        Event::MouseButtonUp {
-                            which,
-                            x,
-                            y,
-                            mouse_btn: sdl2::mouse::MouseButton::Left,
-                            ..
-                        } if captured && *which != u32::MAX => {
-                            xy = pos(local(*x, *y));
-                            Some(9)
-                        }
-                        Event::MouseMotion { which, x, y, .. }
-                            if captured && *which != u32::MAX =>
-                        {
-                            xy = pos(local(*x, *y));
-                            Some(10)
-                        }
-                        Event::FingerDown {
-                            touch_id,
-                            finger_id,
-                            x,
-                            y,
-                            ..
-                        } if captured && menu_contact.is_none() => {
-                            xy = pos((*x, *y));
-                            menu_contact = Some((*touch_id, *finger_id));
-                            Some(8)
-                        }
-                        Event::FingerUp {
-                            touch_id,
-                            finger_id,
-                            x,
-                            y,
-                            ..
-                        } if menu_contact == Some((*touch_id, *finger_id)) => {
-                            xy = pos((*x, *y));
-                            menu_contact = None;
-                            Some(9)
-                        }
-                        Event::FingerMotion {
-                            touch_id,
-                            finger_id,
-                            x,
-                            y,
-                            ..
-                        } if menu_contact == Some((*touch_id, *finger_id)) => {
-                            xy = pos((*x, *y));
-                            Some(10)
-                        }
                         Event::MouseWheel { y, .. } if captured => {
                             xy.1 = *y;
                             Some(13)
@@ -557,10 +582,10 @@ fn play_loop(
                     };
                     if let Some(a) = action.filter(|_| focused) {
                         if a == 1 {
-                            edge_swipe.cancel_pending();
-                            if menu_contact.take().is_some() {
+                            if menu_pointers.cancel() {
                                 ui.tick(14, 0, 0, "")?;
                             }
+                            edge_swipe.cancel_pending();
                             for d in keys.release() {
                                 session.input(d)?;
                             }

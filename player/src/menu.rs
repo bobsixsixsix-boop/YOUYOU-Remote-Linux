@@ -1,8 +1,124 @@
 use sdl2::{render::WindowCanvas, sys::SDL_Renderer};
 use std::{
+    collections::BTreeMap,
     ffi::{c_char, c_void, CStr, CString},
     ptr::NonNull,
 };
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Pointer {
+    Mouse(u32),
+    Finger(i64, i64),
+}
+
+pub(super) enum Press {
+    Down,
+    Move,
+    Up,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PointerRoute {
+    Remote,
+    Consume,
+    Menu(i32),
+}
+
+#[cfg(test)]
+mod pointer_tests {
+    use super::*;
+    use PointerRoute::{Consume, Menu as Action, Remote};
+    use Press::{Down, Move, Up};
+
+    #[test]
+    fn only_a_single_local_press_completes_a_menu_click() {
+        let mut input = MenuPointers::default();
+        let first = Pointer::Finger(1, 10);
+        let second = Pointer::Mouse(2);
+        assert_eq!(input.route(first, Down, true), Action(8));
+        assert_eq!(input.route(first, Move, true), Action(10));
+        assert_eq!(input.route(second, Down, true), Action(14));
+        assert_eq!(input.route(first, Up, true), Consume);
+        assert_eq!(input.route(second, Up, true), Consume);
+        assert_eq!(input.route(second, Down, true), Action(8));
+        assert_eq!(input.route(second, Up, true), Action(9));
+    }
+
+    #[test]
+    fn a_menu_press_stays_local_through_a_shortcut_close() {
+        let mut input = MenuPointers::default();
+        let mouse = Pointer::Mouse(0);
+        assert_eq!(input.route(mouse, Down, true), Action(8));
+        assert!(input.cancel());
+        assert_eq!(input.route(mouse, Move, false), Consume);
+        assert_eq!(input.route(mouse, Up, false), Consume);
+        assert_eq!(input.route(mouse, Move, false), Remote);
+        assert_eq!(input.route(mouse, Down, false), Remote);
+        assert_eq!(input.route(mouse, Up, false), Remote);
+    }
+}
+
+/// A menu click requires one pointer from down to up. A pointer taken by the
+/// menu stays local even if a shortcut closes the drawer before its release.
+#[derive(Default)]
+pub(super) struct MenuPointers {
+    // The value records where each down began, even if capture changes later.
+    held: BTreeMap<Pointer, bool>,
+    primary: Option<Pointer>,
+}
+
+impl MenuPointers {
+    pub fn cancel(&mut self) -> bool {
+        self.primary.take().is_some()
+    }
+
+    pub fn route(&mut self, id: Pointer, phase: Press, captured: bool) -> PointerRoute {
+        use PointerRoute::*;
+        match phase {
+            Press::Down => {
+                if self.held.contains_key(&id) {
+                    return Consume;
+                }
+                self.held.insert(id, captured);
+                if !captured {
+                    Remote
+                } else if self.held.len() == 1 {
+                    self.primary = Some(id);
+                    Menu(8)
+                } else if self.cancel() {
+                    Menu(14) // Cancel the native press when a second pointer joins.
+                } else {
+                    Consume
+                }
+            }
+            Press::Move => {
+                if captured && self.primary == Some(id) {
+                    Menu(10)
+                } else if captured || self.held.get(&id) == Some(&true) {
+                    Consume
+                } else {
+                    Remote
+                }
+            }
+            Press::Up => {
+                let local = self.held.remove(&id) == Some(true);
+                if self.primary == Some(id) {
+                    self.primary = None;
+                    if captured {
+                        Menu(9)
+                    } else {
+                        Consume
+                    }
+                } else if captured || local {
+                    Consume
+                } else {
+                    Remote
+                }
+            }
+        }
+    }
+}
+
 pub trait Menu {
     fn report_present_fps(&mut self, _fps: f64) {}
     fn tick(&mut self, action: i32, x: i32, y: i32, text: &str) -> Result<i32, String>;
