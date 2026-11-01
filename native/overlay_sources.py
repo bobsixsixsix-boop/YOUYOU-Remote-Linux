@@ -51,12 +51,33 @@ live = live.replace('    ~LiveFrontend()', '''
     bool hasStreamOverlay()const{return active() || networkOverlay || Sint32(modeNoticeUntil-SDL_GetTicks())>0;}
     ~LiveFrontend()''')
 # Hardware clocks and Switch-only controller emulation are not Linux features.
-live = live.replace('const bool unsupported=a==750;', 'const bool unsupported=a==750 || a==50 || a==59 || a==610 || a==856 || a==613;')
+live = live.replace('const bool unsupported=a==750;', 'const bool unsupported=a==750 || a==50 || a==59 || a==856 || a==613;')
 live = live.replace('touchMode=1,inputMode=0,','touchMode=1,inputMode=1,')
 live = live.replace('row(0,"键鼠映射",600,true', 'row(0,"仅键鼠 / 触屏",600,true')
 live = live.replace('串流中长按减号键', '可接入 SDL 识别的外接手柄').replace('在手柄和键鼠操作之间切换', '键鼠和触控在两种模式下均可使用')
-live = live.replace('平板多点触控",614,true,nativeMultitouch', '平板多点触控",614,true,true')
-live = live.replace('nativeMultitouch=p.value("multitouch",true);', 'nativeMultitouch=true;')
+# Use the persisted multitouch flag, not touch_mode (which upstream always saves as 1).
+live = live.replace('if(page==Page::Touch && (a==610 || a==611)){touchMode=1;nativeMultitouch=false;client->command("release");resetTouchZoom=true;draining=true;save();return;}',
+                    '''if(page==Page::Touch && (a==610 || a==614)){
+            const bool native=a==614;
+            if(native!=nativeMultitouch){
+                if(client)client->command("release");
+                nativeMultitouch=native;
+                draining=true;
+                if(client)save();
+            }
+            return;
+        }''')
+live = live.replace('case 614:nativeMultitouch=true;client->command("release");resetTouchZoom=true;draining=true;save();break;', '')
+touch = live.index('        case Page::Touch:title=')
+end = live.index('        case Page::Mouse:title=', touch)
+live = live[:touch] + '''        case Page::Touch:title="触屏操作";
+            row(0,"原生多点触控",614,true,nativeMultitouch);
+            row(1,"桌面鼠标",610,true,!nativeMultitouch);
+            twoLineLabel(r,f.small,nativeMultitouch?"将手指触点直接发送给电脑，支持双指操作。":"手指落在哪里，指针就到哪里。按住拖动窗口，抬手松开左键。",
+                         {848,360,376,92},label);
+            break;
+''' + live[end:]
+live = live.replace('nativeMultitouch?"平板多点触控":"手机鼠标指针"', 'nativeMultitouch?"原生多点触控":"桌面鼠标"')
 live = live.replace('SDL_StopTextInput();keyboardEditRequested=true;', 'SDL_StartTextInput();')
 live = live.replace('长按 ＋', '关闭窗口').replace('返回启动器', '退出 Linux 客户端')
 live = live.replace('"Nintendo Switch"', '"Linux / Y700"').replace('键鼠映射模式','仅键鼠 / 触屏').replace('inputMode?"手柄直连":"键鼠映射"','inputMode?"手柄直连":"仅键鼠 / 触屏"')

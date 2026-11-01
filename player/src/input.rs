@@ -102,6 +102,64 @@ pub(crate) struct InputState {
     keys: BTreeSet<i32>,
     pub buttons: BTreeSet<u8>,
     fingers: BTreeMap<(i64, i64), (u8, f32, f32)>,
+    pub desktop_mouse: Option<DesktopMouse>,
+}
+
+pub(crate) fn absolute_pointer((x, y): (f32, f32)) -> Value {
+    json!({"action":"mouse_move_absolute","abs_x":x,"abs_y":y})
+}
+
+// The host tracks "phone_mouse" separately from the physical mouse's default
+// "controls" owner, so a finger lifting cannot release another device's button.
+#[derive(Default)]
+pub(crate) struct DesktopMouse {
+    contacts: BTreeSet<(i64, i64)>,
+    drag: Option<((i64, i64), (f32, f32))>,
+}
+impl DesktopMouse {
+    fn button_position(p: (f32, f32)) -> Value {
+        // The local worker strips "source" on the wire. Keep these two
+        // positions when it drops stale drag samples on a congested channel.
+        let mut packet = absolute_pointer(p);
+        packet["source"] = "touch_button_position".into();
+        packet
+    }
+    fn button(down: bool) -> Value {
+        json!({"action":if down {"mouse_press"} else {"mouse_release"},"button":1,"source":"phone_mouse"})
+    }
+    pub fn press(&mut self, id: (i64, i64), point: Option<(f32, f32)>) -> [Option<Value>; 2] {
+        let first = self.contacts.is_empty();
+        self.contacts.insert(id);
+        if let Some(p) = point.filter(|_| first) {
+            self.drag = Some((id, p));
+            return [Some(Self::button_position(p)), Some(Self::button(true))];
+        }
+        [None, None]
+    }
+    pub fn motion(&mut self, id: (i64, i64), point: Option<(f32, f32)>) -> Option<Value> {
+        let (owner, last) = self.drag.as_mut()?;
+        let p = point?;
+        if *owner != id || *last == p {
+            return None;
+        }
+        *last = p;
+        Some(absolute_pointer(p))
+    }
+    pub fn lift(&mut self, id: (i64, i64), point: Option<(f32, f32)>) -> [Option<Value>; 2] {
+        self.contacts.remove(&id);
+        if let Some((_, last)) = self.drag.filter(|(owner, _)| *owner == id) {
+            self.drag = None;
+            return [
+                Some(Self::button_position(point.unwrap_or(last))),
+                Some(Self::button(false)),
+            ];
+        }
+        [None, None]
+    }
+    fn cancel(&mut self) -> Option<Value> {
+        self.contacts.clear();
+        self.drag.take().map(|_| Self::button(false))
+    }
 }
 
 impl InputState {
@@ -159,17 +217,30 @@ impl InputState {
             .collect();
         Some(json!({"action":"touch_native","type":kind,"points":points}))
     }
-    pub fn release(&mut self) -> Vec<Value> {
+    pub fn set_desktop_mouse(&mut self, enabled: bool) -> Vec<Value> {
+        if self.desktop_mouse.is_some() == enabled {
+            return Vec::new();
+        }
+        let events = self.release_touches();
+        self.desktop_mouse = enabled.then(DesktopMouse::default);
+        events
+    }
+    fn release_touches(&mut self) -> Vec<Value> {
         let mut events = Vec::new();
+        if !self.fingers.is_empty() {
+            self.fingers.clear();
+            events.push(json!({"action":"touch_native","type":4,"points":[]}));
+        }
+        events.extend(self.desktop_mouse.as_mut().and_then(DesktopMouse::cancel));
+        events
+    }
+    pub fn release(&mut self) -> Vec<Value> {
+        let mut events = self.release_touches();
         for key in std::mem::take(&mut self.keys) {
             events.push(json!({"action":"kbd_release","key":key}));
         }
         for button in std::mem::take(&mut self.buttons) {
             events.push(json!({"action":"mouse_release","button":button}));
-        }
-        if !self.fingers.is_empty() {
-            self.fingers.clear();
-            events.push(json!({"action":"touch_native","type":4,"points":[]}));
         }
         events
     }

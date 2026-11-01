@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "youyou-linux"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "qrcode",
  "sdl2",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "youyou-player"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "sdl2",
  "serde_json",

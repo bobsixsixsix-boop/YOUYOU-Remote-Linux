@@ -57,18 +57,27 @@ impl Touch {
         })
     }
 
-    pub(crate) fn packet(
+    pub(crate) fn packets(
         self,
         keys: &mut InputState,
         view: Rect,
         output: (u32, u32),
-    ) -> Option<Value> {
-        if self.phase == Phase::Up {
-            return keys.finger(self.id, None, false);
-        }
+    ) -> [Option<Value>; 2] {
         let down = self.phase == Phase::Down;
-        let point = image_point(view, output, self.point, !down)?;
-        keys.finger(self.id, Some(point), down)
+        let point = image_point(view, output, self.point, !down);
+        if let Some(mouse) = &mut keys.desktop_mouse {
+            return match self.phase {
+                Phase::Down => mouse.press(self.id, point),
+                Phase::Motion => [mouse.motion(self.id, point), None],
+                Phase::Up => mouse.lift(self.id, point),
+            };
+        }
+        let packet = if self.phase == Phase::Up {
+            keys.finger(self.id, None, false)
+        } else {
+            point.and_then(|p| keys.finger(self.id, Some(p), down))
+        };
+        [packet, None]
     }
 }
 
@@ -204,6 +213,88 @@ mod tests {
         }
     }
 
+    fn desktop_packets(keys: &mut InputState, id: i64, phase: Phase, x: u32, y: u32) -> Vec<Value> {
+        sample(id, phase, x, y, 100)
+            .packets(keys, Rect::new(128, 80, 1024, 640), WINDOW)
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn desktop_drag_moves_to_contact_before_press_and_releases_at_lift() {
+        let mut keys = InputState::default();
+        keys.set_desktop_mouse(true);
+        let down = desktop_packets(&mut keys, 5, Down, 640, 400);
+        assert_eq!(
+            down,
+            vec![
+                serde_json::json!({"action":"mouse_move_absolute","abs_x":0.5,"abs_y":0.5,"source":"touch_button_position"}),
+                serde_json::json!({"action":"mouse_press","button":1,"source":"phone_mouse"})
+            ]
+        );
+        assert_eq!(
+            desktop_packets(&mut keys, 5, Motion, 896, 560),
+            vec![crate::input::absolute_pointer((0.75, 0.75))]
+        );
+        assert_eq!(
+            desktop_packets(&mut keys, 5, Up, 1279, 799),
+            vec![
+                serde_json::json!({"action":"mouse_move_absolute","abs_x":1.0,"abs_y":1.0,"source":"touch_button_position"}),
+                serde_json::json!({"action":"mouse_release","button":1,"source":"phone_mouse"})
+            ]
+        );
+        assert!(keys.release().is_empty());
+    }
+
+    #[test]
+    fn black_bars_and_extra_fingers_do_not_pick_up_a_mouse_drag() {
+        let mut keys = InputState::default();
+        keys.set_desktop_mouse(true);
+        for (id, phase, x, y) in [
+            (1, Down, 48, 80),
+            (1, Motion, 640, 400),
+            (2, Down, 640, 400),
+            (1, Up, 640, 400),
+            (2, Motion, 680, 400),
+            (2, Up, 680, 400),
+        ] {
+            assert!(desktop_packets(&mut keys, id, phase, x, y).is_empty());
+        }
+        assert_eq!(desktop_packets(&mut keys, 1, Down, 640, 400).len(), 2);
+        assert!(desktop_packets(&mut keys, 2, Down, 720, 400).is_empty());
+        assert!(desktop_packets(&mut keys, 2, Motion, 750, 400).is_empty());
+        assert_eq!(desktop_packets(&mut keys, 1, Up, 640, 400).len(), 2);
+        assert!(desktop_packets(&mut keys, 3, Down, 720, 400).is_empty());
+        assert!(desktop_packets(&mut keys, 2, Up, 750, 400).is_empty());
+        assert!(desktop_packets(&mut keys, 3, Up, 720, 400).is_empty());
+        assert_eq!(desktop_packets(&mut keys, 4, Down, 640, 400).len(), 2);
+    }
+
+    #[test]
+    fn switching_or_losing_focus_releases_only_the_owner_that_pressed() {
+        let mut keys = InputState::default();
+        assert_eq!(desktop_packets(&mut keys, 4, Down, 640, 400)[0]["type"], 1);
+        assert_eq!(keys.set_desktop_mouse(true)[0]["type"], 4);
+        keys.mouse(1, true);
+        desktop_packets(&mut keys, 6, Down, 640, 400);
+        let finger_up =
+            serde_json::json!({"action":"mouse_release","button":1,"source":"phone_mouse"});
+        assert_eq!(keys.set_desktop_mouse(false), vec![finger_up.clone()]);
+        assert!(keys.buttons.contains(&1));
+        assert!(desktop_packets(&mut keys, 6, Up, 640, 400).is_empty());
+        keys.set_desktop_mouse(true);
+        desktop_packets(&mut keys, 7, Down, 640, 400);
+        assert_eq!(
+            keys.release(),
+            vec![
+                finger_up,
+                serde_json::json!({"action":"mouse_release","button":1})
+            ]
+        );
+        assert!(keys.release().is_empty());
+    }
+
     #[test]
     fn both_edges_claim_only_an_inward_swipe_and_swallow_its_tail() {
         for (start, end) in [(25, 99), (1254, 1180)] {
@@ -322,7 +413,7 @@ mod tests {
         let packets: Vec<_> = buffer
             .into_iter()
             .chain([second])
-            .map(|s| s.packet(&mut keys, view, WINDOW).unwrap())
+            .flat_map(|s| s.packets(&mut keys, view, WINDOW).into_iter().flatten())
             .collect();
         assert_eq!(
             packets

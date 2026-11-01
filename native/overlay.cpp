@@ -90,7 +90,8 @@ struct Layout {
     }
     ~Layout(){SDL_RenderSetScale(r,1,1);SDL_RenderSetViewport(r,&old);SDL_RenderSetScale(r,sx,sy);}
 };
-int flags(const View &v){return (v.ui.captures()?1:0)|(v.ui.gamepadMode()?2:0)|(v.ui.active()?4:0);}
+int flags(const View &v){return (v.ui.captures()?1:0)|(v.ui.gamepadMode()?2:0)|(v.ui.active()?4:0)|
+    (v.ui.multitouch()?0:8);}
 template<class F>int guard(F f){try{return f();}catch(const std::exception &e){uiError=e.what();return -1;}catch(...){uiError="SDL UI failed";return -1;}}
 }
 extern "C" const char *yy_ui_error(){return uiError.c_str();}
@@ -323,6 +324,16 @@ extern "C" int yy_ui_selftest(SDL_Renderer *renderer,const char *assets){
         tap(confirmClose,901,102); // Disconnect confirmation must be safe to dismiss.
         tap(confirmClose,1204,58);
         if(confirmClose.active())throw std::runtime_error("Close in confirmation did not dismiss the whole drawer");
+        tvui::LiveFrontend touch(renderer,1);
+        tap(touch,1000,357); // Peripherals
+        tap(touch,1000,357); // Touch input
+        if(!touch.isOnPage(tvui::Page::Touch) || !touch.multitouch())
+            throw std::runtime_error("Native touch input not available by default");
+        tap(touch,1000,284); // Desktop mouse
+        if(touch.multitouch())throw std::runtime_error("Cannot enable desktop mouse");
+        touch.input({},state,false); // Finish draining the previous selection.
+        tap(touch,1000,206);
+        if(!touch.multitouch())throw std::runtime_error("Cannot restore native touch input");
         return 0;
     });
 }

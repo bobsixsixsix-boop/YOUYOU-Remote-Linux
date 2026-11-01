@@ -70,6 +70,27 @@
              if (auto description = peer_->remoteDescription()) {
  #ifdef _WIN32
                  _mkdir("diag");
+@@ -1921,8 +1918,11 @@
+         if(type!=2)diagnostic(type==1?"native-touch-start":type==3?"native-touch-end":"native-touch-cancel");
+         return;
+     }
++    // Keep the position paired with a touch mouse button transition; otherwise
++    // congestion could drop the move and click the previous desktop location.
++    const std::string owner=data.value("source",std::string("controls"));
+     if (it->second->bufferedAmount() > 64 * 1024 &&
+-        (action == "mouse_move_absolute" || action == "mouse_scroll"))
++        ((action == "mouse_move_absolute" && owner != "touch_button_position") || action == "mouse_scroll"))
+         return;
+     // The UI may request a pad before SCTP opens. Retry on the worker when
+     // an actual update can be submitted; never send updates before setup.
+@@ -1931,7 +1931,6 @@
+         if(!gamepadConnected_)return;
+     }
+     const bool mouseButton=action=="mouse_press" || action=="mouse_release";
+-    const std::string owner=data.value("source",std::string("controls"));
+     int button=0;
+     if(mouseButton){
+         button=data.at("button").get<int>();
 --- a/turn_stream.cpp
 +++ b/turn_stream.cpp
 @@ -6,7 +6,7 @@

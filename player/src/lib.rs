@@ -9,7 +9,7 @@ pub use controllers::{Controllers, PadAction};
 pub use menu::{attach_upstream, menu_self_test, preview, Menu};
 use touch::{EdgeSwipe, Route, Touch};
 
-use input::{button, image_point, pad_state, vk, InputState};
+use input::{absolute_pointer, button, image_point, pad_state, vk, InputState};
 use menu::{MenuPointers, Pointer, PointerRoute, Press};
 use sdl2::{
     event::{Event, WindowEvent},
@@ -47,7 +47,11 @@ pub struct PlayerStatus {
 impl PlayerStatus {
     fn window_title(&self) -> String {
         // The Y700 edge script checks this state before the session's free-form detail.
-        let page = if self.streaming { "串流中" } else { "设备" };
+        let page = if self.streaming {
+            "串流中"
+        } else {
+            "设备"
+        };
         format!("YOUYOU · {page} | {}   |   F8 菜单 · F11 全屏", self.title)
     }
 }
@@ -155,7 +159,7 @@ fn paint(
     Ok(())
 }
 fn pointer(session: &mut impl Session, point: (f32, f32)) -> Result<(), String> {
-    session.input(json!({"action":"mouse_move_absolute","abs_x":point.0,"abs_y":point.1}))
+    session.input(absolute_pointer(point))
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -185,8 +189,24 @@ fn send_touches(
     samples: impl IntoIterator<Item = Touch>,
 ) -> Result<(), String> {
     for sample in samples {
-        if let Some(packet) = sample.packet(keys, view, output) {
+        for packet in sample.packets(keys, view, output).into_iter().flatten() {
             session.input(packet)?;
+        }
+    }
+    Ok(())
+}
+
+fn sync_touch_mode(
+    session: &mut impl Session,
+    keys: &mut InputState,
+    edge: &mut EdgeSwipe,
+    flags: i32,
+) -> Result<(), String> {
+    let desktop = flags & 8 != 0;
+    if keys.desktop_mouse.is_some() != desktop {
+        edge.cancel_pending();
+        for release in keys.set_desktop_mouse(desktop) {
+            session.input(release)?;
         }
     }
     Ok(())
@@ -333,6 +353,7 @@ fn play_loop(
                 redraw |= flags != menu_flags
                     || (flags & 4 != 0 && menu_paint.elapsed() >= Duration::from_millis(100));
                 menu_flags = flags;
+                sync_touch_mode(session, &mut keys, &mut edge_swipe, flags)?;
                 if flags & 1 != 0 {
                     edge_swipe.cancel_pending();
                 }
@@ -433,6 +454,8 @@ fn play_loop(
                 let touch = Touch::from_event(&event);
                 let mut open_by_swipe = false;
                 if let Some(sample) = touch.filter(|_| focused && streaming && menu.is_some()) {
+                    // An earlier menu event in this same SDL batch may have changed the mode.
+                    sync_touch_mode(session, &mut keys, &mut edge_swipe, menu_flags)?;
                     let eligible = menu_flags & 1 == 0;
                     match edge_swipe.route(sample, logical, eligible) {
                         Route::Hold => continue,
