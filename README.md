@@ -31,7 +31,7 @@ v0.1.15 把上游的 Switch 程序整个移植成一个 Linux 程序，再在里
 | `account/` | 账号材料（APK 提取签名、client-id、单实例锁），v0.2 直接复用。 |
 | `tools/` | `decbench.c`、`v4l2bench.c`（解码延迟对比）、`pacing-run.sh`（上屏节奏），结果在 `tools/results/`。 |
 
-根目录的 `src/`、`native/`、`player/`、`build.rs`、`Cargo.toml`、`packaging/`、`integrations/` 是 v0.1.15，v0.2 做完后删除。
+根目录的 `src/`、`native/`、`player/`、`build.rs`、`Cargo.toml`、`packaging/`、`integrations/` 是 v0.1.15，只留作对照，v0.2 做完后删除。`player/src/input.rs` 已经移到 `app/`，所以这棵旧树在 main 上编不过；要构建 v0.1.15，用 tag `v0.1.15`。
 
 ### 现在能做什么
 
