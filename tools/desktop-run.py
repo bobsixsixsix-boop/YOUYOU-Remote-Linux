@@ -3,10 +3,11 @@ streamed). Starts tools/stream-run.sh on the Y700, waits for the virtual display
 GameViewer adds for the session, shows y700's motion.html on it, ends the session after
 the tablet's measurement and copies the tablet's results to tools/results/runs/<label>.
 
-Switch the computer's physical monitors off at their power buttons first: GameViewer
-keeps them awake during a session, a software display-off stops the stream, and it puts
-them back within a second if they are taken out of the layout (README, root causes).
-host-display-power.txt logs Windows' console display state for reference.
+The computer's physical monitors stay on: the motion page opens on the virtual display
+only. Turning them off in software is not an option anyway: GameViewer keeps them awake
+during a session, a software display-off stops the stream, and it puts them back within a
+second if they are taken out of the layout (README, root causes). host-display-power.txt
+logs Windows' console display state for reference.
 
 Needs y700's linux/streaming (host-run.py, motion.html) in Y700_STREAMING and the build
 in /root/yybuild on the tablet (ML_TABLET, default as in host-run.py).
