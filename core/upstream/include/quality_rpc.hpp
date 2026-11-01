@@ -6,8 +6,9 @@ namespace uu {
 inline constexpr const char *systemActionChannel="CONTROL_DATA_CHANNEL";
 struct CaptureRpcAck {uint64_t requestId=0;unsigned errors=0,entries=0;int errorCode=0;bool capture=false;unsigned otherFields=0;};
 // The current screen of Main.screens; type 1 is a virtual display, modes are
-// the desktop sizes it offers.
-struct ScreenSourceInfo {int screenId=-1;unsigned count=0;int type=0,width=0,height=0;std::vector<std::pair<int,int>> modes;};
+// the desktop sizes it offers, scales its Windows display scales (Screen.dpi_scale).
+struct ScreenSourceInfo {int screenId=-1;unsigned count=0;int type=0,width=0,height=0;std::vector<std::pair<int,int>> modes;
+                        int scale=0,recommendedScale=0;std::vector<int> scales;};
 struct CaptureSettingSyncInfo {
     unsigned fields=0; // bit0 fps, bit1 quality, bit2 width, bit3 height, bit4 bitrate
     int fps=0,quality=0,chroma=0,resolutionType=0,dpiScale=0,orientation=0;
@@ -38,7 +39,8 @@ Bytes fpsSettingRpc(uint64_t requestId,int fps);
 Bytes videoQualitySettingRpc(uint64_t requestId,int quality);
 // Quality/fps/bitrate-only update. Deliberately omits resolution fields so a
 // bitrate or frame-rate change cannot switch the host capture resolution.
-Bytes qualityUpdateRpc(uint64_t requestId,int fps,int quality,int screenId,int customMbps=0);
+// dpiScale, when set, also changes the screen's Windows display scale (field 9).
+Bytes qualityUpdateRpc(uint64_t requestId,int fps,int quality,int screenId,int customMbps=0,int dpiScale=0);
 // Full mobile-shaped capture request: source dimensions stay as observed, while
 // the pixel dimensions bound the encoded video. Keeps fps/quality/bitrate.
 Bytes videoScaleRpc(uint64_t requestId,int sourceWidth,int sourceHeight,

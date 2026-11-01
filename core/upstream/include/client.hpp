@@ -22,6 +22,11 @@ struct Snapshot {
     bool privacyPending=false,privacyKnown=false;
     PrivacyMode privacyMode=PrivacyMode::Off,privacyRequestedMode=PrivacyMode::Unknown;
     std::string privacyNotice;
+    // Windows display scale of the streamed screen (Screen.dpi_scale); 0 = unknown.
+    bool desktopVirtual=false;
+    int desktopScale=0,desktopScaleRecommended=0,desktopScaleRequested=0;
+    std::vector<int> desktopScales;
+    std::string desktopScaleNotice;
     bool textPending=false;
     uint64_t textRevision=0;
     int textResult=0; // 0=idle, 1=pending, 2=paste submitted, 3=failed/cancelled.
@@ -118,6 +123,7 @@ class Client {
     bool hevc_ = false;
     bool secondScreen_ = false; // connect as a dedicated desktop (virtual display)
     uint64_t desktopModeRpc_ = 0; // this session's virtual display size request, 0 = not sent
+    uint64_t desktopScaleRpc_ = 0; // the last display scale request, 0 = none
     bool rembAvailable_ = false, bitrateFeedbackSent_ = false;
     unsigned rembTargetBps_ = 0;
     int64_t lastBitrateAttempt_ = 0;

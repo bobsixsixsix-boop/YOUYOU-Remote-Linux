@@ -198,10 +198,10 @@ Bytes desktopModeRpc(uint64_t id,int screenId,int w,int h,int fps,int quality,in
     integer(out,1,id);integer(out,2,nowMs());message(out,21,rpc);return out;
 }
 
-Bytes qualityUpdateRpc(uint64_t id,int fps,int quality,int screenId,int customMbps){
+Bytes qualityUpdateRpc(uint64_t id,int fps,int quality,int screenId,int customMbps,int dpiScale){
     if(!id || screenId<0 || !supportedCaptureRate(fps) || quality<1 || quality>6 ||
        customMbps<0 || customMbps>100 || (quality==6&&customMbps==0) ||
-       (quality!=6&&customMbps!=0))throw std::invalid_argument("Invalid quality update");
+       (quality!=6&&customMbps!=0) || dpiScale<0 || dpiScale>1000)throw std::invalid_argument("Invalid quality update");
     Bytes capture,header,rpc,out;
     integer(capture,1,captureRateTier(fps));integer(capture,2,quality);integer(capture,3,1);
     integer(capture,12,0);
@@ -210,6 +210,7 @@ Bytes qualityUpdateRpc(uint64_t id,int fps,int quality,int screenId,int customMb
     // No resolution/max-scale/pixel fields: this request must only update the
     // encoder controls and leave the host capture resolution unchanged.
     if(quality==6)integer(capture,8,uint64_t(customMbps)*1000000u);
+    if(dpiScale)integer(capture,9,unsigned(dpiScale));
     integer(header,1,id);message(rpc,1,header);message(rpc,2,capture);
     integer(out,1,id);integer(out,2,nowMs());message(out,21,rpc);return out;
 }
@@ -274,6 +275,30 @@ static bool displayDimensions(const Field &prop,int &width,int &height){
     width=dims[2] && dims[3]?dims[2]:dims[0];height=dims[2] && dims[3]?dims[3]:dims[1];
     return r.good();
 }
+// Screen.dpi_scale (GameViewer gv_pb.DpiScale): 1 current, 2 recommended, 3 the
+// scales offered, packed or not.
+static bool displayScales(const Field &prop,ScreenSourceInfo &info){
+    if(prop.wire!=2)return false;
+    Reader r(prop.data,prop.size);Field f;ScreenSourceInfo s;
+    auto offer=[&](uint64_t v){if(v && v<=1000 && s.scales.size()<16)s.scales.push_back(int(v));};
+    while(r.next(f)){
+        if(f.key==1 && f.wire==0 && f.value<=1000)s.scale=int(f.value);
+        else if(f.key==2 && f.wire==0 && f.value<=1000)s.recommendedScale=int(f.value);
+        else if(f.key==3 && f.wire==0)offer(f.value);
+        else if(f.key==3 && f.wire==2){
+            uint64_t v=0;unsigned shift=0;
+            for(size_t i=0;i<f.size;++i){
+                if(shift>63)return false;
+                v|=uint64_t(f.data[i]&127)<<shift;shift+=7;
+                if(!(f.data[i]&128)){offer(v);v=0;shift=0;}
+            }
+            if(shift)return false;
+        }
+    }
+    if(!r.good())return false;
+    info.scale=s.scale;info.recommendedScale=s.recommendedScale;info.scales=std::move(s.scales);
+    return true;
+}
 std::optional<ScreenSourceInfo> parseScreenSources(const uint8_t *data,size_t size)noexcept{    if(!data || !size || size>65536)return {};
     bool found=false;ScreenSourceInfo result;
     Reader outer(data,size);Field f;
@@ -298,6 +323,9 @@ std::optional<ScreenSourceInfo> parseScreenSources(const uint8_t *data,size_t si
                     if(!displayDimensions(prop,w,h))continue;
                     if(prop.key==4){info.width=w;info.height=h;}
                     else if(w && h && info.modes.size()<64)info.modes.emplace_back(w,h);
+                }else if(prop.key==9){
+                    // Like the sizes: a bad scale list only hides the scale menu.
+                    if(!displayScales(prop,info)){info.scale=info.recommendedScale=0;info.scales.clear();}
                 }
                 if(!screen.good())return {};
                 for(unsigned i=0;i<count;++i)if(ids[i]==id)return {};

@@ -718,6 +718,13 @@ void Client::handle(const Event &event) {
             if(pendingQuality_ && pendingQuality_->screenId!=screen)
                 fallbackQuality("电脑屏幕已变化，正在重新连接…");
         }
+        {
+            std::lock_guard lock(stateMutex_);
+            state_.desktopVirtual=data.value("type",0)==1;
+            state_.desktopScale=data.value("scale",0);state_.desktopScaleRecommended=data.value("recommended_scale",0);
+            state_.desktopScales=data.value("scales",std::vector<int>{});
+            if(state_.desktopScale==state_.desktopScaleRequested)state_.desktopScaleRequested=0;
+        }
         // Dedicated desktop: the host brings the virtual display up at the size it
         // remembers for this client. Ask once for the stream size if it offers it.
         const int w=data.value("width",0),h=data.value("height",0);
@@ -745,6 +752,10 @@ void Client::handle(const Event &event) {
         const bool hasFps=bool(syncFields&1u),hasQuality=bool(syncFields&2u);
         const bool hasWidth=bool(syncFields&4u),hasHeight=bool(syncFields&8u);
         const bool hasBitrate=bool(syncFields&16u);
+        if(const int scale=data.value("dpi_scale",0)){
+            std::lock_guard lock(stateMutex_);state_.desktopScale=scale;
+            if(scale==state_.desktopScaleRequested)state_.desktopScaleRequested=0;
+        }
         const int syncFps=fpsFromTier(data.value("fps",0));
         const int syncQuality=data.value("quality",0);
         const int syncWidth=data.value("width",0),syncHeight=data.value("height",0);
@@ -939,6 +950,17 @@ void Client::handle(const Event &event) {
         }
         if(desktopModeRpc_ && data.at("id").get<uint64_t>()==desktopModeRpc_){
             diagnostic(("desktop-mode-ack-errors-"+std::to_string(data.value("errors",0u))+"-code-"+std::to_string(data.value("code",0))).c_str());
+            return;
+        }
+        if(desktopScaleRpc_ && data.at("id").get<uint64_t>()==desktopScaleRpc_){
+            const auto errors=data.value("errors",0u);const int code=data.value("code",0);
+            diagnostic(("desktop-scale-ack-errors-"+std::to_string(errors)+"-code-"+std::to_string(code)).c_str());
+            desktopScaleRpc_=0;
+            // Success shows up as the new scale in the next screen list or setting sync.
+            if(errors || code){
+                std::lock_guard lock(stateMutex_);state_.desktopScaleRequested=0;
+                state_.desktopScaleNotice="电脑没有接受缩放，错误码 "+std::to_string(code);
+            }
             return;
         }
         if(!pendingQuality_ || pendingQuality_->acknowledged || data.at("id").get<uint64_t>()!=pendingQuality_->id)return;
@@ -1164,6 +1186,28 @@ void Client::handle(const Event &event) {
         pendingPrivacy_=PendingPrivacy{id,monotonicMs()+8000,mode};
         std::lock_guard lock(stateMutex_);state_.privacyPending=true;state_.privacyRequestedMode=mode;state_.privacyNotice="正在等待电脑确认屏幕保护模式…";
         diagnostic(("privacy-screen-request-mode-"+std::to_string(modeValue)).c_str());
+    } else if(e=="desktop-scale") {
+        // Windows display scale of the streamed screen, one of the scales its screen list offers.
+        const int scale=data.at("scale").get<int>();
+        const auto state=snapshot();
+        const auto channel=channels_.find("TEXT_DATA_CHANNEL");
+        if(!state.streaming || activeScreenId_<0 || channel==channels_.end() || !channel->second->isOpen()){
+            std::lock_guard lock(stateMutex_);state_.desktopScaleNotice="电脑通道尚未就绪，请稍后重试";return;
+        }
+        if(std::find(state.desktopScales.begin(),state.desktopScales.end(),scale)==state.desktopScales.end()){
+            diagnostic(("desktop-scale-not-offered-"+std::to_string(scale)).c_str());return;
+        }
+        try{
+            const auto id=nextQualityRpc_;
+            const auto bytes=qualityUpdateRpc(id,streamFps_,streamQuality_,activeScreenId_,
+                                              streamQuality_==6?maxBitrateMbps_:0,scale);
+            channel->second->send(reinterpret_cast<const std::byte*>(bytes.data()),bytes.size());
+            desktopScaleRpc_=id;++nextQualityRpc_;
+        }catch(const std::exception &){
+            std::lock_guard lock(stateMutex_);state_.desktopScaleNotice="缩放请求发送失败";return;
+        }
+        std::lock_guard lock(stateMutex_);state_.desktopScaleRequested=scale;state_.desktopScaleNotice.clear();
+        diagnostic(("desktop-scale-request-"+std::to_string(scale)+"-from-"+std::to_string(state.desktopScale)).c_str());
     } else if(e=="privacy-screen-ack") {
         if(!pendingPrivacy_ || data.at("id").get<uint64_t>()!=pendingPrivacy_->id)return;
         const auto requested=pendingPrivacy_->mode;pendingPrivacy_.reset();
@@ -1754,7 +1798,8 @@ void Client::beginPeer(const Json &result) {
                     std::lock_guard lock(queue->mutex);
                     if(queue->events.size()>124)return;
                     if(screens)queue->events.push_back({"quality-screens",{{"screen",screens->screenId},{"count",screens->count},
-                        {"type",screens->type},{"width",screens->width},{"height",screens->height},{"modes",screens->modes}},generation});
+                        {"type",screens->type},{"width",screens->width},{"height",screens->height},{"modes",screens->modes},
+                        {"scale",screens->scale},{"recommended_scale",screens->recommendedScale},{"scales",screens->scales}},generation});
                     if(settingSync)queue->events.push_back({"capture-setting-sync",
                         {{"fields",settingSync->fields},
                          {"fps",settingSync->fps},{"quality",settingSync->quality},
@@ -2091,7 +2136,10 @@ void Client::disconnect() {
     setVideoScaleNotice("");
     pendingPrivacy_.reset();
     {std::lock_guard lock(stateMutex_);state_.qualityPending=false;state_.settingApplyPending=false;
-        state_.privacyPending=false;state_.privacyKnown=false;state_.privacyMode=PrivacyMode::Off;state_.privacyRequestedMode=PrivacyMode::Unknown;state_.privacyNotice.clear();}
+        state_.privacyPending=false;state_.privacyKnown=false;state_.privacyMode=PrivacyMode::Off;state_.privacyRequestedMode=PrivacyMode::Unknown;state_.privacyNotice.clear();
+        state_.desktopVirtual=false;state_.desktopScale=state_.desktopScaleRecommended=state_.desktopScaleRequested=0;
+        state_.desktopScales.clear();state_.desktopScaleNotice.clear();}
+    desktopScaleRpc_=0;
     connectedSince_=0;
     if (strictVideo_)
         strictVideo_->shutdown();
