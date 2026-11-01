@@ -1,0 +1,396 @@
+--- a/include/config_store.hpp
++++ b/include/config_store.hpp
+@@ -1,4 +1,5 @@
+ #pragma once
++#include <algorithm>
+ #include <map>
+ #include <mutex>
+ #include <string>
+@@ -15,6 +16,17 @@
+ // are retained. Frame pacing keeps the first parsed value (including 0 #comment).
+ void saveQualityConfig(int width, int height, int fps, int quality, bool vsync,
+                        int playoutDelay, int maxBitrateMbps, bool hevc, bool av1 = false);
++
++// Stable service device identifiers, never display numbers or session UUIDs.
++inline bool validSecondScreenDeviceId(const std::string &id) {
++    if(id.empty() || id.size()>256)return false;
++    const auto alnum=[](unsigned char c){return (c>='a'&&c<='z') || (c>='A'&&c<='Z') || (c>='0'&&c<='9');};
++    if(!alnum(static_cast<unsigned char>(id.front())))return false;
++    return std::all_of(id.begin(),id.end(),[&](unsigned char c){return alnum(c) || c=='-' || c=='_' || c=='.' || c==':';});
++}
++// Invalid persisted JSON is an error, not an instruction to erase preferences.
++bool secondScreenForDevice(const std::string &deviceId);
++void saveSecondScreenForDevice(const std::string &deviceId, bool enabled);
+ 
+ // Thread-safe read-only view of config.ini for all modules. Reload replaces the
+ // map atomically; readers never observe a partially parsed file.
+--- a/config_store.cpp
++++ b/config_store.cpp
+@@ -10,6 +10,9 @@
+ #include <string>
+ #include <vector>
+ #include <algorithm>
++#include <cerrno>
++#include <set>
++#include <nlohmann/json.hpp>
+ #ifdef __SWITCH__
+ #include <sys/stat.h>
+ #include <dirent.h>
+@@ -18,10 +21,45 @@
+ 
+ namespace uu {
+ namespace {
+-#ifdef __SWITCH__
+-constexpr const char *kDirectory = "sdmc:/switch/UURemote-ns";
++std::mutex configWriteMutex;
++#ifdef __SWITCH__
+ constexpr const char *kPath = "sdmc:/switch/UURemote-ns/config.ini";
+ constexpr const char *kBackup = "sdmc:/switch/UURemote-ns/config.ini.bak";
++#else
++constexpr const char *kPath = "config.ini";
++constexpr const char *kBackup = "config.ini.bak";
++#endif
++bool writeAtomic(const std::string &content) {
++    if (content.empty()) return false;
++    const std::string temporary = std::string(kPath) + ".tmp";
++    {
++        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
++        output.write(content.data(), std::streamsize(content.size()));
++        output.flush();
++        if (!output) {
++            std::remove(temporary.c_str());
++            return false;
++        }
++    }
++    std::ifstream existing(kPath, std::ios::binary);
++    const bool hadConfig = bool(existing);
++    existing.close();
++    if (hadConfig) {
++        std::remove(kBackup);
++        if (std::rename(kPath, kBackup) != 0) {
++            std::remove(temporary.c_str());
++            return false;
++        }
++    }
++    if (std::rename(temporary.c_str(), kPath) != 0) {
++        if (hadConfig) std::rename(kBackup, kPath);
++        std::remove(temporary.c_str());
++        return false;
++    }
++    return true;
++}
++#ifdef __SWITCH__
++constexpr const char *kDirectory = "sdmc:/switch/UURemote-ns";
+ constexpr const char *kTemplatePath = "romfs:/default-config.ini";
+ constexpr unsigned kConfigVersion = 3;
+ 
+@@ -87,35 +125,6 @@
+     if(version==1 && key=="playout_delay_ms" && value=="16") return true;
+     return false;
+ }
+-bool writeAtomic(const std::string &content) {
+-    if (content.empty()) return false;
+-    const std::string temporary = std::string(kPath) + ".tmp";
+-    {
+-        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+-        output.write(content.data(), std::streamsize(content.size()));
+-        output.flush();
+-        if (!output) {
+-            std::remove(temporary.c_str());
+-            return false;
+-        }
+-    }
+-    std::ifstream existing(kPath, std::ios::binary);
+-    const bool hadConfig = bool(existing);
+-    existing.close();
+-    if (hadConfig) {
+-        std::remove(kBackup);
+-        if (std::rename(kPath, kBackup) != 0) {
+-            std::remove(temporary.c_str());
+-            return false;
+-        }
+-    }
+-    if (std::rename(temporary.c_str(), kPath) != 0) {
+-        if (hadConfig) std::rename(kBackup, kPath);
+-        std::remove(temporary.c_str());
+-        return false;
+-    }
+-    return true;
+-}
+ void log(const char *message) {diagnostic(message);}
+ void pruneLegacyBackups() {
+     if (DIR *dir = opendir(kDirectory)) {
+@@ -136,6 +145,43 @@
+     }
+ }
+ #endif
++using PreferenceJson = nlohmann::json;
++PreferenceJson parseSecondScreenDevices(const std::string &text) {
++    if(text.size()>32768)throw std::runtime_error("专用桌面设置过大，原设置未改动");
++    try {
++        std::set<std::string> keys;
++        auto value=PreferenceJson::parse(text,[&keys](int,PreferenceJson::parse_event_t event,PreferenceJson &item){
++            if(event==PreferenceJson::parse_event_t::key && !keys.insert(item.get<std::string>()).second)
++                throw std::runtime_error("duplicate device");
++            return true;
++        });
++        if(!value.is_object() || value.size()>64)throw std::runtime_error("invalid devices");
++        for(auto it=value.begin();it!=value.end();++it)
++            if(!validSecondScreenDeviceId(it.key()) || !it.value().is_boolean())
++                throw std::runtime_error("invalid device preference");
++        return value;
++    }catch(const std::exception &){
++        throw std::runtime_error("专用桌面设置损坏，原设置未改动");
++    }
++}
++std::vector<std::string> preferenceConfigLines() {
++    errno=0;
++    FILE *file=std::fopen(kPath,"rb");
++    if(!file){
++        if(errno==ENOENT)return {};
++        throw std::runtime_error("无法读取专用桌面设置，原设置未改动");
++    }
++    std::string text;char buffer[4096];size_t n;
++    while((n=std::fread(buffer,1,sizeof buffer,file))!=0){
++        text.append(buffer,n);
++        if(text.size()>1024*1024){std::fclose(file);throw std::runtime_error("配置文件过大，原设置未改动");}
++    }
++    const bool failed=std::ferror(file)!=0;std::fclose(file);
++    if(failed)throw std::runtime_error("无法读取专用桌面设置，原设置未改动");
++    std::istringstream input(text);std::vector<std::string> lines;std::string line;
++    while(std::getline(input,line))lines.push_back(line);
++    return lines;
++}
+ } // namespace
+ void ensureDefaultConfig() noexcept {
+ #ifdef __SWITCH__
+@@ -283,8 +329,43 @@
+         return config::choice(text, fallback, {30, 60, 120});
+     return config::integer(text, fallback, minimum, maximum);
+ }
++bool secondScreenForDevice(const std::string &deviceId) {
++    if(!validSecondScreenDeviceId(deviceId))throw std::invalid_argument("Invalid second-screen device ID");
++    // reload() owns the first-wins interpretation for the entire config file.
++    const auto &store=ConfigStore::instance();
++    if(!store.has("second_screen_devices"))return false;
++    const auto devices=parseSecondScreenDevices(store.value("second_screen_devices"));
++    const auto found=devices.find(deviceId);
++    return found!=devices.end() && found->get<bool>();
++}
++void saveSecondScreenForDevice(const std::string &deviceId,bool enabled) {
++    if(!validSecondScreenDeviceId(deviceId))throw std::invalid_argument("Invalid second-screen device ID");
++    std::lock_guard lock(configWriteMutex);
++    const auto lines=preferenceConfigLines();
++    auto devices=PreferenceJson::object();bool found=false;
++    for(const auto &line:lines)if(config::keyOf(line)=="second_screen_devices" && !found){
++        devices=parseSecondScreenDevices(config::valueOf(line));found=true;
++    }
++    if(enabled){
++        if(!devices.contains(deviceId) && devices.size()>=64)
++            throw std::runtime_error("已保存 64 台电脑的专用桌面设置");
++        devices[deviceId]=true;
++    }else devices.erase(deviceId);
++    std::string content;
++    for(const auto &line:lines)if(config::keyOf(line)!="second_screen_devices")content+=line+'\n';
++    content+="second_screen_devices="+devices.dump()+'\n';
++    if(!writeAtomic(content))throw std::runtime_error("专用桌面设置保存失败，未切换连接");
++#ifdef __SWITCH__
++    if(R_FAILED(fsdevCommitDevice("sdmc")))throw std::runtime_error("专用桌面设置写入未确认，未切换连接");
++#endif
++    ConfigStore::instance().reload();
++    const auto &stored=ConfigStore::instance();
++    if(!stored.has("second_screen_devices") || parseSecondScreenDevices(stored.value("second_screen_devices"))!=devices)
++        throw std::runtime_error("专用桌面设置回读不一致，未切换连接");
++}
+ void saveQualityConfig(int width, int height, int fps, int quality, bool vsync,
+                        int playoutDelay, int maxBitrateMbps, bool hevc, bool av1) {
++    std::lock_guard lock(configWriteMutex);
+ #ifdef __SWITCH__
+     const std::string path = "sdmc:/switch/UURemote-ns/config.ini";
+ #else
+--- a/include/protocol.hpp
++++ b/include/protocol.hpp
+@@ -17,7 +17,8 @@
+                        const std::string &body, const std::string &client, const std::string &device,
+                        const std::string &user, int64_t timestamp);
+ Bytes connectOptions(int width = 1280, int height = 720, int fps = 30, int quality = 3, int customMbps = 0,
+-                     bool hevc = false, bool av1Preferred = false);
++                     bool hevc = false, bool av1Preferred = false, bool secondScreen = false,
++                     const std::string &clientDeviceId = {});
+ Bytes launchApp(uint64_t seq, const Json &app);
+ Json ackValue(const Json &args, const std::string &event);
+ Json soac(const Json &client, const std::string &type, const Json &payload, const Json &ice,
+--- a/protocol.cpp
++++ b/protocol.cpp
+@@ -1,4 +1,5 @@
+ #include "protocol.hpp"
++#include "config_store.hpp"
+ #include "stream_size.hpp"
+ #include "capture_rate.hpp"
+ #include <cctype>
+@@ -139,7 +140,10 @@
+ static void text(Bytes &b, int field, const std::string &s) {
+     message(b, field, Bytes(s.begin(), s.end()));
+ }
+-Bytes connectOptions(int w, int h, int fps, int quality, int customMbps, bool hevc, bool av1Preferred) {
++Bytes connectOptions(int w, int h, int fps, int quality, int customMbps, bool hevc, bool av1Preferred,
++                     bool secondScreen, const std::string &clientDeviceId) {
++    if(secondScreen && !validSecondScreenDeviceId(clientDeviceId))
++        throw std::invalid_argument("Second screen requires a stable client device ID");
+     if (!streamSize(w,h))
+         throw std::invalid_argument("Unsupported capture resolution");
+     if (quality < 1 || quality > 6 || customMbps < 0 || customMbps > 100 ||
+@@ -170,7 +174,7 @@
+         integer(decoder, 4, h);
+         message(out, 4, decoder);
+     };
+-    integer(out, 1, 1);
++    integer(out, 1, secondScreen ? 6 : 1); // CT_SECOND_SCREEN / CT_DESKTOP
+     integer(out, 2, uint64_t(-1));
+     message(out, 3, capture);
+     addDecoder(hevc || av1Preferred ? 2 : 1);
+@@ -179,6 +183,9 @@
+     Bytes mode;integer(mode,1,w);integer(mode,2,h);integer(mode,3,fps);
+     message(out,6,mode);message(out,7,resolution);
+     integer(out, 8, 2);
++    // The host keys its second_screen_layout_<device>.cfg by this field.
++    // Its ordinary desktop/RPC-created screen path does not restore that file.
++    if(secondScreen)text(out,9,clientDeviceId);
+     return out;
+ }
+ Bytes launchApp(uint64_t seq, const Json &app) {
+--- a/include/client.hpp
++++ b/include/client.hpp
+@@ -19,6 +19,7 @@
+ namespace uu {
+ class TurnStreamBridge;
+ struct Snapshot {
++    bool secondScreen=false;
+     std::shared_ptr<const DisplayView> displays;
+     bool privacyPending=false,privacyKnown=false;
+     PrivacyMode privacyMode=PrivacyMode::Off,privacyRequestedMode=PrivacyMode::Unknown;
+@@ -116,7 +117,9 @@
+     int streamWidth_ = 1280, streamHeight_ = 720, streamFps_ = 120, streamQuality_ = 3;
+     int keyframeIntervalMs_ = 4000;
+     int maxBitrateMbps_ = 0;
+-    bool hevc_ = false, av1_ = false;
++    bool hevc_ = false, av1_ = false, secondScreen_ = false, secondScreenConfirmed_=false;
++    std::string secondScreenBlockedDevice_;
++    int64_t secondScreenConfirmDeadline_=0;
+     bool rembAvailable_ = false, bitrateFeedbackSent_ = false;
+     unsigned rembTargetBps_ = 0;
+     int64_t lastBitrateAttempt_ = 0;
+@@ -173,6 +176,7 @@
+     VirtualDisplays displays_;
+     void publishDisplays();
+     void displayCommand(const Json &);
++    void desktopModeCommand(const Json &);
+     void sendDisplayRpc(uint64_t,VirtualDisplays::Op,int,int,int,int,const std::vector<std::pair<int,int>> &);
+     void handle(const Event &event);
+     void packet(const WsMessage &message);
+--- a/client.cpp
++++ b/client.cpp
+@@ -580,6 +580,12 @@
+             tickQuality();
+             tickVideoScale();
+             if(displays_.expire(monotonicMs()))publishDisplays();
++            if(secondScreen_ && !secondScreenConfirmed_ && displays_.view.sessionManaged>=0 &&
++               snapshot().streaming && media_->stats().publishedTotal>0)
++                secondScreenConfirmed_=true;
++            if(secondScreen_ && !secondScreenConfirmed_ && secondScreenConfirmDeadline_ &&
++               monotonicMs()>=secondScreenConfirmDeadline_)
++                throw std::runtime_error("电脑未确认专用桌面画面，可能尚不支持此连接模式");
+             if(pendingPrivacy_ && monotonicMs()>=pendingPrivacy_->deadline){
+                 pendingPrivacy_.reset();
+                 std::lock_guard lock(stateMutex_);state_.privacyPending=false;
+@@ -682,11 +688,27 @@
+                 else
+                     diagnostic("failure-selected-pair-unavailable");
+             }
++            const bool failedSecondScreen=secondScreen_ && !secondScreenConfirmed_ && !cancel_;
++            std::string secondScreenFailure;
++            if(failedSecondScreen){
++                // Stop repeated create attempts. A rejected session must leave
++                // the home screen able to start an ordinary desktop connection.
++                secondScreenBlockedDevice_=connectedDeviceId_;
++                try {
++                    saveSecondScreenForDevice(connectedDeviceId_,false);
++                    secondScreenFailure="专用桌面连接失败，已恢复普通桌面设置。"+failure;
++                }catch(const std::exception &){
++                    secondScreenFailure="专用桌面连接失败，设置回滚未保存，本次启动将使用普通桌面。"+failure;
++                }
++            }
+             disconnect();
+             if (cancel_) {
+                 cancel_ = false;
+                 reconnectArmed_ = false; // User cancelled, disable auto-reconnect
+                 setState("idle", "已取消");
++            } else if(failedSecondScreen){
++                reconnectAt_=0;reconnectArmed_=false;
++                setState("idle",secondScreenFailure);
+             } else {
+                 const bool transient=reason=="failure-connect-timeout" || reason=="failure-signal-heartbeat" ||
+                     reason=="failure-signal-read" || reason=="failure-signal-remote-close" ||
+@@ -720,6 +742,7 @@
+         reconnectArmed_=false;reconnectAt_=0;reconnectAttempts_=0;
+     }
+     if(e=="virtual-display"){displayCommand(data);return;}
++    if(e=="desktop-mode"){desktopModeCommand(data);return;}
+     if(e=="virtual-display-ack"){
+         if(displays_.ack(data.at("id").get<uint64_t>(),data.at("create").get<bool>()?VirtualDisplays::Op::Create:
+                          VirtualDisplays::Op::Remove,data.at("code").get<int>()))publishDisplays();
+@@ -1125,9 +1148,15 @@
+     } else if (e == "connect" || e=="retry-connect") {
+         if(e=="connect") {reconnectArmed_=true;reconnectAttempts_=0;reconnectAt_=0;}
+         else if(!reconnectArmed_) return;
+-        connectedDeviceId_ = data.at("deviceId").get<std::string>();
++        const auto requestedDevice=data.at("deviceId").get<std::string>();
++        const bool requestedSecondScreen=requestedDevice!=secondScreenBlockedDevice_ && secondScreenForDevice(requestedDevice);
++        if(requestedSecondScreen && (!api_->authenticated() || !validSecondScreenDeviceId(api_->device())))
++            throw std::runtime_error("专用桌面缺少有效登录设备身份，请重新登录");
+         disconnect();
+-        {std::lock_guard lock(stateMutex_);state_.activeDeviceId=connectedDeviceId_;}
++        connectedDeviceId_=requestedDevice;secondScreen_=requestedSecondScreen;
++        if(secondScreen_)displays_.beginSecondScreenSession(streamWidth_,streamHeight_,streamFps_);
++        publishDisplays();
++        {std::lock_guard lock(stateMutex_);state_.activeDeviceId=connectedDeviceId_;state_.secondScreen=secondScreen_;}
+         cancel_ = false;
+         setState("joining", "正在加入远控房间…");
+         auto room = api_->request(
+@@ -1302,6 +1331,7 @@
+         if (s == int(rtc::PeerConnection::State::Connected)) {
+             deadline_ = 0;
+             connectedSince_=monotonicMs();reconnectAt_=0;
++            secondScreenConfirmDeadline_=secondScreen_?connectedSince_+10000:0;
+             applyBitrateCap();
+             if (video_ && video_->requestKeyframe()) {
+                 lastKeyframeRequest_ = monotonicMs();
+@@ -1465,7 +1495,8 @@
+                 throw std::runtime_error("房间内没有在线电脑");
+             control_ = uuid();
+             offerWidth_=streamWidth_;offerHeight_=streamHeight_;
+-            auto options = connectOptions(streamWidth_, streamHeight_, streamFps_, streamQuality_,streamQuality_==6?maxBitrateMbps_:0,hevc_,av1_);
++            auto options = connectOptions(streamWidth_, streamHeight_, streamFps_, streamQuality_,streamQuality_==6?maxBitrateMbps_:0,
++                                          hevc_,av1_,secondScreen_,api_->device());
+             diagnostic(("encoder-bitrate-request-connect-bps-"+
+                         std::to_string(streamQuality_==6?uint64_t(maxBitrateMbps_)*1000000u:0)+
+                         "-quality-"+std::to_string(streamQuality_)).c_str());
+@@ -2097,6 +2128,8 @@
+ }
+ #endif
+ void Client::disconnect() {
++    secondScreen_=false;secondScreenConfirmed_=false;secondScreenConfirmDeadline_=0;
++    {std::lock_guard lock(stateMutex_);state_.secondScreen=false;}
+     // There is no authenticated persistent monitor token in the host protocol.
+     // Do not guess ownership of an orphan or a reused Windows ID on reconnect.
+     displays_=VirtualDisplays{};publishDisplays();
+@@ -2384,8 +2417,7 @@
+     const auto id=nextQualityRpc_++;
+     try {
+         const auto &topology=displays_.view;
+-        const auto *owned=activeScreenId_==topology.owned && activeScreenId_==topology.current
+-            ?topology.find(activeScreenId_):nullptr;
++        const auto *owned=activeScreenId_==topology.current?topology.captureDesktop():nullptr;
+         const auto bytes=videoScaleRpc(id,media.width,media.height,streamWidth_,streamHeight_,
+                                        streamFps_,streamQuality_,activeScreenId_,
+                                        streamQuality_==6?maxBitrateMbps_:0,owned);

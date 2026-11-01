@@ -71,3 +71,30 @@ void Client::displayCommand(const Json &data) {
     sendDisplayRpc(id,op,target,w,h,0,modes);
     publishDisplays();
 }
+
+void Client::desktopModeCommand(const Json &data) {
+    const auto state=snapshot();
+    auto reject=[&](const char *message){displays_.view.notice=message;publishDisplays();};
+    const auto enabled=data.find("enabled");
+    const auto device=data.find("deviceId"),session=data.find("session");
+    if(enabled==data.end() || !enabled->is_boolean() || device==data.end() || !device->is_string() ||
+       session==data.end() || !session->is_number_unsigned()){
+        reject("连接模式请求无效");return;
+    }
+    const bool busy=pendingQuality_ || pendingQualityApply_ || pendingPrivacy_ ||
+        (pendingVideoScale_ && !pendingVideoScale_->acknowledged);
+    if(!desktopModeChangeAllowed(displays_.view,state.streaming,api_->authenticated(),busy,
+                                 connectedDeviceId_,device->get<std::string>(),session->get<uint64_t>()) ||
+       state.activeDeviceId!=connectedDeviceId_ || !validSecondScreenDeviceId(api_->device())){
+        reject("连接或屏幕状态已变化，请等待设置完成后重试");return;
+    }
+    const bool target=enabled->get<bool>();
+    if(target==secondScreen_){reject("当前已使用所选连接模式");return;}
+    try {saveSecondScreenForDevice(connectedDeviceId_,target);}
+    catch(const std::exception &error){reject(error.what());return;}
+    if(target)secondScreenBlockedDevice_.clear();
+    const auto id=connectedDeviceId_;
+    disconnect();
+    setState("idle",target?"正在重新连接专用桌面…":"正在重新连接普通桌面…");
+    post("connect",{{"deviceId",id}},generation_);
+}

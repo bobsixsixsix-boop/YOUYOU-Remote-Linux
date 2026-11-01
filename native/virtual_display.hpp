@@ -36,7 +36,7 @@ struct HostScreen {
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(HostScreen,id,type,width,height,fps,name,modes)
 struct DisplayView {
     std::vector<HostScreen> screens;
-    int current=-1,owned=-1;
+    int current=-1,owned=-1,sessionManaged=-1;
     uint64_t session=0;
     bool known=false,pending=false,createUncertain=false;
     std::string notice;
@@ -44,9 +44,13 @@ struct DisplayView {
         const auto it=std::find_if(screens.begin(),screens.end(),[id](const auto &s){return s.id==id;});
         return it==screens.end()?nullptr:&*it;
     }
+    const HostScreen *captureDesktop() const {
+        const auto *screen=(current==owned || current==sessionManaged)?find(current):nullptr;
+        return screen && screen->type==1?screen:nullptr;
+    }
     bool capturesOwnedSize(int w,int h) const {
-        const auto *screen=find(owned);
-        return !pending && current==owned && screen && screen->type==1 && screen->hasSize(w,h);
+        const auto *screen=captureDesktop();
+        return !pending && screen && screen->hasSize(w,h);
     }
     bool canCreate() const {
         return known && find(current) && !pending && !createUncertain && owned<0 &&
@@ -57,6 +61,12 @@ struct DisplayView {
         return !pending && s && s->type==1 && find(current) && current!=owned;
     }
 };
+
+inline bool desktopModeChangeAllowed(const DisplayView &view,bool streaming,bool authenticated,bool busy,
+                                    const std::string &active,const std::string &requested,uint64_t session) {
+    return streaming && authenticated && !busy && !view.pending && view.session && session==view.session &&
+           !active.empty() && active==requested;
+}
 
 class VirtualDisplays {
 public:
@@ -69,6 +79,12 @@ public:
         std::optional<HostScreen> added;
     };
     struct InitialMode {int id,w,h,fps;};
+    void beginSecondScreenSession(int w,int h,int fps) {
+        // A new object is required for a new connection generation. Do not let
+        // an old topology or repeated call authorize a reused display number.
+        if(view.known || secondScreenSession_)return;
+        secondScreenSession_=true;sessionTarget_=InitialMode{-1,w,h,fps};
+    }
     // A create RPC can move capture onto the newly attached Windows monitor
     // without honoring its requested desktop size. Consume the correction
     // once, only when the same monitor is still owned and currently captured.
@@ -81,13 +97,14 @@ public:
         return mode;
     }
     bool begin(Op op,uint64_t id,int target,int w,int h,int fps,int64_t now) {
+        if(secondScreenSession_ && (op==Op::Create || op==Op::Remove))return false;
         if(request_ || !view.known || !view.find(view.current))return false;
         if(op==Op::Create && !view.canCreate())return false;
         if(op==Op::Select && (!view.find(target) || target==view.current))return false;
         if(op==Op::Initialize){
             const auto *s=view.find(target);
             if(!initialMode_ || initialMode_->id!=target || initialMode_->w!=w || initialMode_->h!=h ||
-               initialMode_->fps!=fps || target!=view.current || target!=view.owned || !s || s->type!=1 ||
+               initialMode_->fps!=fps || target!=view.current || (target!=view.owned && target!=view.sessionManaged) || !s || s->type!=1 ||
                !s->supports(w,h) || s->hasSize(w,h))return false;
         }
         if(op==Op::Remove && (!view.canRemove() || target!=view.owned))return false;
@@ -110,9 +127,25 @@ public:
     void observe(std::vector<HostScreen> screens,int current) {
         std::optional<HostScreen> old;
         if(const auto *owned=view.find(view.owned))old=*owned;
+        std::optional<HostScreen> managed;
+        if(const auto *screen=view.find(view.sessionManaged))managed=*screen;
         view.known=true;view.current=current;view.screens=std::move(screens);
         if(old && (!view.find(old->id) || !old->identity(*view.find(old->id)))){
             initialMode_.reset();view.owned=-1;view.notice="已失去原虚拟屏标识";
+        }
+        if(managed && (!view.find(managed->id) || !managed->identity(*view.find(managed->id)))){
+            initialMode_.reset();view.sessionManaged=-1;managedRetired_=true;
+            view.notice="专用桌面已变化，未接管其他屏幕";
+        }
+        if(secondScreenSession_ && !managedRetired_ && view.sessionManaged<0){
+            const auto *screen=view.find(view.current);
+            const auto virtualCount=std::count_if(view.screens.begin(),view.screens.end(),[](const auto &s){return s.type==1;});
+            if(virtualCount==1 && screen && screen->type==1){
+                view.sessionManaged=screen->id;
+                if(!screen->hasSize(sessionTarget_.w,sessionTarget_.h) && screen->supports(sessionTarget_.w,sessionTarget_.h))
+                    initialMode_=InitialMode{screen->id,sessionTarget_.w,sessionTarget_.h,sessionTarget_.fps};
+                view.notice="电脑已确认专用桌面";
+            }
         }
         if(!request_)return;
         auto &p=*request_;p.updated=true;
@@ -132,6 +165,8 @@ public:
         finish("发送失败，请核对电脑状态");
     }
 private:
+    bool secondScreenSession_=false,managedRetired_=false;
+    InitialMode sessionTarget_{-1,0,0,0};
     std::optional<InitialMode> initialMode_;
     std::optional<Pending> request_;
     void finish(std::string notice){request_.reset();view.pending=false;view.notice=std::move(notice);}
@@ -158,7 +193,7 @@ private:
         }else if(p.op==Op::Select && view.current==p.target)finish("已切换到所选屏幕");
         else if(p.op==Op::Initialize && view.current==p.target){
             const auto *s=view.find(p.target);
-            if(p.target==view.owned && s && s->hasSize(p.w,p.h))finish("电脑已确认虚拟屏分辨率");
+            if((p.target==view.owned || p.target==view.sessionManaged) && s && s->hasSize(p.w,p.h))finish("电脑已确认虚拟屏分辨率");
         }
         else if(p.op==Op::Remove && !view.find(p.target))finish("电脑已确认移除虚拟屏");
     }
