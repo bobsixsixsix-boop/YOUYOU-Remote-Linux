@@ -5,7 +5,6 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 description = "UU Remote client for Linux tablets (Lenovo Legion Y700)"
 
-# Standalone until the old Codex workspace at the repository root is removed.
 [workspace]
 
 [dependencies]
