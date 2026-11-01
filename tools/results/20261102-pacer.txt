@@ -1,0 +1,33 @@
+Frame pacer A/B over the real network: tools/desktop-run.py on the Y700, 2026-11-02.
+SEIHAKUNOPC desktop, 2280x1428@120, H.265, 100 Mbps cap (the host reported
+100 applied), panel 120 Hz. Three pairs back to back, 60 s connected each,
+ml-flips.py counting KWin page flips for 30 s. YY_PACE=1 = pacer ("流畅"),
+YY_PACE=0 = newest picture, swap interval 0 ("低延迟"). Raw: runs/ab{1,2,3}-pace{0,1}/.
+
+run       | flips/s | interval 1 | interval 2+ | 1 % low | 0.1 % low | worst  | s with repeat | decoder->swap p50/p95
+ab1 pace0 |  116.7  |  97.26 %   |   2.74 %    |  55.9   |  32.7     | 33.3   | 19/29         |  0.5 /  0.8 ms
+ab1 pace1 |  119.8  |  99.81 %   |   0.19 %    | 100.0   |  60.0     | 16.7   |  5/29         | 10.6 / 18.7 ms
+ab2 pace0 |  113.5  |  94.44 %   |   5.56 %    |  53.7   |  25.7     | 50.0   | 24/29         |  0.4 /  0.7 ms
+ab2 pace1 |  119.9  |  99.89 %   |   0.11 %    | 107.7   |  60.0     | 16.7   |  3/29         | 10.9 / 18.5 ms
+ab3 pace0 |  119.4  |  99.53 %   |   0.47 %    |  77.8   |  40.0     | 33.3   | 13/29         |  0.4 /  0.7 ms
+ab3 pace1 |  119.9  |  99.89 %   |   0.11 %    | 107.7   |  60.0     | 16.7   |  4/29         | 14.5 / 18.9 ms
+
+- Without the pacer the result depends on the network minute: 94.4-99.5 %
+  single-refresh pictures, repeats in 13-24 of 29 seconds. With it 99.8-99.9 %
+  in every pair, never a picture held longer than two refreshes.
+- "phase ms" (ml-flips.py, where in the refresh KWin's flip lands relative to
+  the player's swap) jumps between ~2.5 and ~5.8 ms without the pacer and the
+  repeats cluster in those seconds: pictures arrive bunched, the newest-wins
+  path shows two in one refresh and none in the next. With the pacer the phase
+  is flat (~2.4 ms) in pairs 1 and 3.
+- Cost: decoder->swap +10-14 ms p50. Part of it is not new latency on screen:
+  without the pacer the swap returns at once but KWin still holds the buffer
+  until its next latch, so the difference that reaches the eye is about one
+  refresh (8.3 ms) plus the 0-2 pictures the queue holds after a burst.
+- Pacer rule (Moonlight's): queue up to 3 decoded pictures, show the oldest
+  each refresh; if the queue stayed above 1 for half a second, drop one to
+  catch up. The "跳过" counts (5-20 per minute) are those catch-ups and
+  decoder overruns, same order with and without the pacer.
+
+Decision: pacer on by default ("流畅"), "低延迟" one tap away in the settings
+page (saved as pace=0 in app.ini; YY_PACE overrides it for a run).

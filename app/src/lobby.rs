@@ -403,6 +403,7 @@ impl Lobby {
             return;
         }
         let (x0, cw) = column(ui, 1100.0);
+        ui.text("改动从下一次连接开始生效", x0 + cw, BAR / 2.0, 15.0, false, MUTED, 1.0);
         let (lw, mut y) = (150.0, BAR + 36.0);
         let (x, width) = (x0 + lw, cw - lw);
         let row = |ui: &mut Ui, y: f32, title: &str| {
@@ -472,8 +473,16 @@ impl Lobby {
             prefs.touch_mouse = i == 1;
             prefs.save();
         }
-        y += used + note(ui, y + used, "桌面鼠标：单指按下就是鼠标左键，可以直接拖窗口。串流中也能在菜单里切换。") + 28.0;
-        ui.text("改动从下一次连接开始生效。", x0, y + 10.0, 15.0, false, MUTED, 0.0);
+        y += used + note(ui, y + used, "桌面鼠标：单指按下就是鼠标左键，可以直接拖窗口。串流中也能在菜单里切换。") + 20.0;
+
+        row(ui, y, "画面节奏");
+        let labels = ["流畅".to_string(), "低延迟".to_string()];
+        let (pick, used) = ui.chips("pace", x, y, width, &labels, Some(!prefs.pace as usize));
+        if let Some(i) = pick {
+            prefs.pace = i == 0;
+            prefs.save();
+        }
+        note(ui, y + used, "流畅：每帧按顺序各显示一次，不重复不跳帧，多约 10 毫秒延迟。低延迟：总显示最新一帧，网络一抖就偶尔重复或跳帧。");
     }
 
     fn size(&mut self, ui: &mut Ui, core: &Core, s: &mut Value) {

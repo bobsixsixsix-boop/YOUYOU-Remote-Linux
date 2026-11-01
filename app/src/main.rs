@@ -27,7 +27,7 @@ const USAGE: &str = "用法：
   youyou connect [电脑名或设备 ID]       直接全屏串流（默认第一台在线的电脑）
   youyou play <片段.h264|.hevc> [帧率]   不联网的解码与显示自测（默认 120 帧）
   youyou import-apk <官方电视版 APK> | import-key <signing.key> | download-key
-环境变量：YY_VSYNC=1 开垂直同步（默认关）；YY_PACE=1 开帧节奏器（含垂直同步）；YY_TOUCH=mouse|touch、YY_DESKTOP=1|0 临时盖过界面里的触屏和专用桌面设置；
+环境变量：YY_PACE=1|0 临时盖过界面里的画面节奏（流畅|低延迟）；YY_VSYNC=1 低延迟时也开垂直同步；YY_TOUCH=mouse|touch、YY_DESKTOP=1|0 临时盖过界面里的触屏和专用桌面设置；
   connect 时 YY_STREAM=2560x1600@120、YY_MBPS=60 临时改串流尺寸、帧率和码率上限";
 const TOUCH_MOUSE: u32 = u32::MAX; // SDL_TOUCH_MOUSEID: mouse events synthesized from touch
 /// A touch starting this close to the left or right edge (dp) and moving this far in opens the menu.
@@ -169,13 +169,14 @@ fn online(device: &Value) -> bool {
 }
 
 /// The app's own choices (upstream keeps the stream settings in its config.ini),
-/// saved as app.ini in the state directory. YY_DESKTOP and YY_TOUCH override them.
-#[derive(Default)]
+/// saved as app.ini in the state directory. YY_DESKTOP, YY_TOUCH and YY_PACE override them.
 struct Prefs {
     /// Ask the computer for a dedicated virtual screen (upstream's secondScreen).
     desktop: bool,
     /// One finger drives the mouse instead of multi-touch.
     touch_mouse: bool,
+    /// Frame pacer ("流畅", the default): every picture in order, one per refresh.
+    pace: bool,
     path: Option<PathBuf>,
 }
 
@@ -188,12 +189,13 @@ impl Prefs {
         Self {
             desktop: env("YY_DESKTOP", "1").unwrap_or_else(|| saved("desktop")),
             touch_mouse: env("YY_TOUCH", "mouse").unwrap_or_else(|| saved("touch_mouse")),
+            pace: env("YY_PACE", "1").unwrap_or_else(|| !text.lines().any(|l| l.trim() == "pace=0")),
             path,
         }
     }
     fn save(&self) {
         if let Some(p) = &self.path {
-            let _ = std::fs::write(p, format!("desktop={}\ntouch_mouse={}\n", self.desktop as u8, self.touch_mouse as u8));
+            let _ = std::fs::write(p, format!("desktop={}\ntouch_mouse={}\npace={}\n", self.desktop as u8, self.touch_mouse as u8, self.pace as u8));
         }
     }
 }
@@ -209,11 +211,11 @@ struct Screen {
     mouse: sdl2::mouse::MouseUtil,
     events: sdl2::EventSubsystem,
     frame_ready: u32,
-    /// Frame pacer: every picture in order, one per refresh.
-    pace: bool,
+    /// YY_VSYNC=1: swap interval 1 without the pacer too.
+    vsync: bool,
     controllers: Option<sdl2::GameControllerSubsystem>,
     pad: Option<GameController>,
-    _video: sdl2::VideoSubsystem,
+    video: sdl2::VideoSubsystem,
     _sdl: sdl2::Sdl,
 }
 
@@ -238,11 +240,10 @@ impl Screen {
             .build()
             .map_err(|e| e.to_string())?;
         let context = window.gl_create_context()?;
-        // Off by default: KWin still flips on vblank (no tearing) and pacing is the same
-        // either way, but at 120 fps on 120 Hz swap interval 1 holds each picture one
-        // more refresh (tools/results/20261102-pacing.txt).
-        let pace = std::env::var("YY_PACE").is_ok_and(|v| v == "1");
-        let vsync = pace || std::env::var("YY_VSYNC").is_ok_and(|v| v == "1");
+        // Without the pacer, off by default: KWin still flips on vblank (no tearing),
+        // but at 120 fps on 120 Hz swap interval 1 holds each picture one more refresh
+        // (tools/results/20261102-pacing.txt). stream() sets it per session.
+        let vsync = std::env::var("YY_VSYNC").is_ok_and(|v| v == "1");
         video.gl_set_swap_interval(if vsync { SwapInterval::VSync } else { SwapInterval::Immediate })?;
         let renderer = video::Renderer::new(&video)?;
         let ui = ui::Ui::new(&video)?;
@@ -273,10 +274,10 @@ impl Screen {
             mouse: sdl.mouse(),
             events,
             frame_ready,
-            pace,
+            vsync,
             controllers: sdl.game_controller().ok(),
             pad: None,
-            _video: video,
+            video,
             _sdl: sdl,
         })
     }
@@ -315,7 +316,7 @@ fn play(path: &Path, fps: f64) -> Result<(), String> {
         thread::sleep(Duration::from_millis(300));
         let _ = sender.push_event(Event::Quit { timestamp: 0 });
     });
-    stream(&mut screen, None, &Value::Null, &mut Prefs::default()).map(|_| ())
+    stream(&mut screen, None, &Value::Null, &mut Prefs::load()).map(|_| ())
 }
 
 /// "2560x1600@120" (+ a bitrate cap in Mbps, 0 = the host's own quality
@@ -422,6 +423,9 @@ fn stream(screen: &mut Screen, core: Option<&Core>, device: &Value, prefs: &mut 
     // A touch that started at a screen edge: never sent to the host, it may open the menu.
     let mut edge: Option<((i64, i64), f32)> = None;
     let mut combo = (false, false); // the pad's Select and Start held
+    let pace = prefs.pace;
+    let swap = if pace || screen.vsync { SwapInterval::VSync } else { SwapInterval::Immediate };
+    screen.video.gl_set_swap_interval(swap)?;
     let mut backlog = false; // pictures still waiting for the pacer
     // How many were waiting at each of the pacer's last takes, half a second of refreshes.
     let mut history = std::collections::VecDeque::new();
@@ -602,7 +606,7 @@ fn stream(screen: &mut Screen, core: Option<&Core>, device: &Value, prefs: &mut 
         // catches up to the newest once none of the last half second's takes found
         // a single picture waiting: a backlog that stays only adds latency.
         let mut previous = None;
-        let next = if !screen.pace {
+        let next = if !pace {
             fresh.then(Frame::acquire).flatten()
         } else if fresh || backlog {
             let catch_up = history.len() == half && history.iter().all(|&w| w > 1);
