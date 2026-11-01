@@ -19,7 +19,7 @@ def style_drawer(live):
             add(1136,84,88,72,"防窥",757,true,false,"",Kind::Shortcut);
             const char *names[]={"显示","安全","外设","更多","Windows 快捷操作"};
             for(int i=0;i<5;++i)add(848,196+66*i,376,58,names[i],21+i,true,false,"",Kind::Menu);
-            aligned(r,f.hint,"F8  /  Select + Start",{848,530,376,45},drawerTheme::secondary,true);
+            aligned(r,f.hint,"侧边内滑打开   ·   F8  /  Select + Start",{848,530,376,45},drawerTheme::secondary,true);
             break;}
 ''' + live[end:]
     replace('add(848,584,376,56,"返回",99)', 'add(848,584,376,56,"收起工具栏",99)')

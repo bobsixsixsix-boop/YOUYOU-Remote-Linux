@@ -103,8 +103,9 @@ void shortcuts(SDL_Renderer *r,Fonts &f,SDL_Rect b) {
         aligned(r,f.hint,key,cap,secondary,true);
         aligned(r,f.hint,value,{cap.x+132,y,b.w-186,28},secondary);
     };
-    row(b.y+51,"Select + Start","手柄工具栏");
-    row(b.y+85,"F8  /  F11","工具栏  /  全屏");
+    row(b.y+47,"触屏","从左侧或右侧向内滑，打开工具栏");
+    row(b.y+79,"Select + Start","手柄工具栏");
+    row(b.y+111,"F8  /  F11","工具栏  /  全屏");
 }
 
 template<class Add>
@@ -128,7 +129,7 @@ void home(SDL_Renderer *r,Fonts &f,Add add,const uu::Snapshot &s,const std::stri
     const SDL_Rect pref=narrow?SDL_Rect{left,cardY+cardH+16,648,202}:SDL_Rect{740,cardY,476,240};
     preferences(r,f,pref,s);
     add(pref.x+12,pref.y+pref.h-55,pref.w-24,48,"串流设置",21);
-    const SDL_Rect keys{pref.x,pref.y+pref.h+16,pref.w,130};
+    const SDL_Rect keys{pref.x,pref.y+pref.h+16,pref.w,154};
     if(!narrow || keys.y+keys.h+62<uiCanvasHeight)shortcuts(r,f,keys);
     if(!narrow)aligned(r,f.hint,"方向键选择     A 确认     B 返回",{left,cardY+cardH+18,cardW,36},secondary);
 }

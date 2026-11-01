@@ -4,8 +4,10 @@ pub mod fullscreen;
 pub mod icons;
 mod input;
 mod menu;
+mod touch;
 pub use controllers::{Controllers, PadAction};
 pub use menu::{attach_upstream, menu_self_test, preview, Menu};
+use touch::{EdgeSwipe, Route, Touch};
 
 use input::{button, image_point, pad_state, vk, InputState};
 use sdl2::{
@@ -166,6 +168,21 @@ pub fn run_authenticated(
     play_loop(session, sdl, canvas)
 }
 
+fn send_touches(
+    session: &mut impl Session,
+    keys: &mut InputState,
+    view: Rect,
+    output: (u32, u32),
+    samples: impl IntoIterator<Item = Touch>,
+) -> Result<(), String> {
+    for sample in samples {
+        if let Some(packet) = sample.packet(keys, view, output) {
+            session.input(packet)?;
+        }
+    }
+    Ok(())
+}
+
 fn play_loop(
     session: &mut impl Session,
     sdl: &sdl2::Sdl,
@@ -175,6 +192,8 @@ fn play_loop(
     let mut fullscreen_button = fullscreen::Control::default();
     let mut menu_flags = 0;
     let mut menu_contact = None;
+    let mut edge_swipe = EdgeSwipe::default();
+    let timer = sdl.timer()?;
     let mut menu_paint = Instant::now();
     let mut exit = Exit::Closed;
     let creator = canvas.texture_creator();
@@ -228,7 +247,18 @@ fn play_loop(
                     pad_started = false;
                     last_pad = None;
                 }
-                can_control = status.can_control && status.streaming;
+                let next_control = status.can_control && status.streaming;
+                if streaming != status.streaming {
+                    edge_swipe = EdgeSwipe::default();
+                    if menu_contact.take().is_some() {
+                        if let Some(ui) = &mut menu {
+                            ui.tick(14, 0, 0, "")?;
+                        }
+                    }
+                } else if can_control != next_control {
+                    edge_swipe.cancel_pending();
+                }
+                can_control = next_control;
                 if streaming && !status.streaming {
                     texture = None;
                     spare_texture = None;
@@ -293,6 +323,9 @@ fn play_loop(
                 redraw |= flags != menu_flags
                     || (flags & 4 != 0 && menu_paint.elapsed() >= Duration::from_millis(100));
                 menu_flags = flags;
+                if flags & 1 != 0 {
+                    edge_swipe.cancel_pending();
+                }
             }
             if redraw {
                 paint(canvas, texture.as_ref(), view)?;
@@ -367,6 +400,19 @@ fn play_loop(
                     redraw = true;
                     continue;
                 }
+                let touch = Touch::from_event(&event);
+                let mut open_by_swipe = false;
+                if let Some(sample) = touch.filter(|_| focused && streaming && menu.is_some()) {
+                    let eligible = menu_flags & 1 == 0;
+                    match edge_swipe.route(sample, logical, eligible) {
+                        Route::Hold => continue,
+                        Route::OpenMenu => open_by_swipe = true,
+                        Route::Replay(samples) if can_control && texture.is_some() => {
+                            send_touches(session, &mut keys, view, output, samples)?;
+                        }
+                        _ => {}
+                    }
+                }
                 if let Some(ui) = &mut menu {
                     if matches!(
                         &event,
@@ -389,6 +435,7 @@ fn play_loop(
                     let mut xy = (0, 0);
                     let mut txt = "";
                     let action = match &event {
+                        _ if open_by_swipe => Some(1),
                         Event::KeyDown {
                             scancode: Some(Scancode::F8),
                             repeat: false,
@@ -476,12 +523,14 @@ fn play_loop(
                             Scancode::Tab => Some(17),
                             Scancode::Num0 | Scancode::Kp0 => Some(16),
                             key if (Scancode::Num1 as i32..=Scancode::Num9 as i32)
-                                .contains(&(*key as i32)) => {
+                                .contains(&(*key as i32)) =>
+                            {
                                 xy.0 = *key as i32 - Scancode::Num1 as i32 + 1;
                                 Some(16)
                             }
                             key if (Scancode::Kp1 as i32..=Scancode::Kp9 as i32)
-                                .contains(&(*key as i32)) => {
+                                .contains(&(*key as i32)) =>
+                            {
                                 xy.0 = *key as i32 - Scancode::Kp1 as i32 + 1;
                                 Some(16)
                             }
@@ -500,6 +549,10 @@ fn play_loop(
                     };
                     if let Some(a) = action.filter(|_| focused) {
                         if a == 1 {
+                            edge_swipe.cancel_pending();
+                            if menu_contact.take().is_some() {
+                                ui.tick(14, 0, 0, "")?;
+                            }
                             for d in keys.release() {
                                 session.input(d)?;
                             }
@@ -533,6 +586,7 @@ fn play_loop(
                             last_pad = None;
                         }
                         focused = false;
+                        edge_swipe = EdgeSwipe::default();
                     }
                     Event::Window {
                         win_event: WindowEvent::FocusGained,
@@ -604,42 +658,12 @@ fn play_loop(
                         session.input(json!({"action":"mouse_scroll","delta_x":(scale*precise_x).round() as i32,
                             "delta_y":(scale*precise_y).round() as i32}))?;
                     }
-                    Event::FingerDown {
-                        touch_id,
-                        finger_id,
-                        x,
-                        y,
-                        ..
-                    } => {
-                        if let Some(p) = image_point(view, output, (x, y), false) {
-                            if let Some(data) = keys.finger((touch_id, finger_id), Some(p), true) {
-                                session.input(data)?;
-                            }
-                        }
-                    }
-                    Event::FingerMotion {
-                        touch_id,
-                        finger_id,
-                        x,
-                        y,
-                        ..
-                    } => {
-                        if let Some(p) = image_point(view, output, (x, y), true) {
-                            if let Some(data) = keys.finger((touch_id, finger_id), Some(p), false) {
-                                session.input(data)?;
-                            }
-                        }
-                    }
-                    Event::FingerUp {
-                        touch_id,
-                        finger_id,
-                        ..
-                    } => {
-                        if let Some(data) = keys.finger((touch_id, finger_id), None, false) {
-                            session.input(data)?;
-                        }
-                    }
-                    _ => {}
+                    _ => send_touches(session, &mut keys, view, output, touch)?,
+                }
+            }
+            if let Some(samples) = edge_swipe.expired(timer.ticks()) {
+                if focused && can_control && texture.is_some() && menu_flags & 1 == 0 {
+                    send_touches(session, &mut keys, view, output, samples)?;
                 }
             }
             if focused

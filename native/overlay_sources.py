@@ -185,7 +185,7 @@ guide = live.index('case Page::Guide:title="操作说明"')
 end = live.index('break;',guide)
 live = live[:guide]+'''case Page::Guide:title="操作说明";
     aligned(r,f.normal,"Linux 平板",{90,155,1100,56},ink);
-    aligned(r,f.small,"触屏　直接操作远程画面，打开工具栏后可点按菜单",{90,255,1100,48},label);
+    aligned(r,f.small,"触屏　从画面左侧或右侧向内滑，打开工具栏。点「收起工具栏」返回串流",{90,255,1100,48},label);
     aligned(r,f.small,"键盘　F8 打开菜单，F11 全屏，方向键选择，回车确认，Esc 返回",{90,340,1100,48},label);
     aligned(r,f.small,"手柄　选择＋开始打开菜单，方向键或左摇杆选择，A 确认，B 返回",{90,425,1100,48},label);
     '''+live[end:]

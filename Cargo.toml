@@ -1,6 +1,6 @@
 [package]
 name = "youyou-linux"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Unofficial Linux client for UU Remote, adapted for the Lenovo Y700"
