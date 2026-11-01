@@ -1,5 +1,6 @@
 #include "cpu_diagnostics.hpp"
 #include "client.hpp"
+#include "stream_limits.hpp"
 #include "config_store.hpp"
 #include "quality_rpc.hpp"
 #include "diagnostics.hpp"
@@ -223,6 +224,8 @@ std::string clientCapabilityJson(int width,int height,int fps,int quality) {
         capability(1,1280,720),capability(2,1280,720),
         capability(1,1920,1080),capability(2,1920,1080)
     });
+    if(!((width==1280 && height==720) || (width==1920 && height==1080)))
+        for(int codec : {1,2})cap["frame_quality_capability"].push_back(capability(codec,width,height));
     return cap.dump();
 }
 // RTP and RTX have independent SSRC/sequence spaces (RFC 4588). The stock
@@ -472,18 +475,14 @@ void Client::recordIceCandidate(const char *direction, const char *stage, rtc::C
     } catch(...) {diagnostic("ice-candidate-diagnostic-unavailable");}
 }
 Client::Client(std::string key, std::string client, std::shared_ptr<Media> media) : media_(std::move(media)) {
-    streamWidth_ = configInt("width", 1280, 320, 1920);
-    streamHeight_ = configInt("height", 720, 180, 1080);
-    const bool supportedResolution=
-        (streamWidth_==960 && streamHeight_==540) ||
-        (streamWidth_==1280 && streamHeight_==720) ||
-        (streamWidth_==1920 && streamHeight_==1080);
-    if(!supportedResolution){
+    streamWidth_ = configInt("width", 1280, 1, 16384);
+    streamHeight_ = configInt("height", 720, 1, 16384);
+    if(!streamSize(streamWidth_,streamHeight_)){
         diagnostic(("config-resolution-normalized-"+std::to_string(streamWidth_)+"x"+
                     std::to_string(streamHeight_)).c_str());
         streamWidth_=1280;streamHeight_=720;
     }
-    streamFps_ = configInt("fps", 60, 30, 60);
+    streamFps_ = configInt("fps", 60, 30, maxCaptureFps);
     streamQuality_ = configInt("quality", 3, 1, 6);
     maxBitrateMbps_=configInt("max_bitrate_mbps",0,0,100);
     if(streamQuality_==6 && maxBitrateMbps_==0)streamQuality_=4;
@@ -719,12 +718,34 @@ void Client::handle(const Event &event) {
             if(pendingQuality_ && pendingQuality_->screenId!=screen)
                 fallbackQuality("电脑屏幕已变化，正在重新连接…");
         }
+        // Dedicated desktop: the host brings the virtual display up at the size it
+        // remembers for this client. Ask once for the stream size if it offers it.
+        const int w=data.value("width",0),h=data.value("height",0);
+        if(secondScreen_ && !desktopModeRpc_ && screen>=0 && data.value("type",0)==1 && w && h &&
+           (w!=streamWidth_ || h!=streamHeight_)){
+            const auto modes=data.value("modes",std::vector<std::pair<int,int>>{});
+            const auto it=channels_.find("TEXT_DATA_CHANNEL");
+            const std::string change=std::to_string(w)+"x"+std::to_string(h)+"-to-"+std::to_string(streamWidth_)+"x"+std::to_string(streamHeight_);
+            if(std::find(modes.begin(),modes.end(),std::make_pair(streamWidth_,streamHeight_))==modes.end())
+                diagnostic(("desktop-mode-not-offered-"+change+"-modes-"+std::to_string(modes.size())).c_str());
+            else if(!pendingQuality_ && it!=channels_.end() && it->second->isOpen()){
+                try{
+                    const auto id=nextQualityRpc_;
+                    const auto bytes=desktopModeRpc(id,screen,streamWidth_,streamHeight_,streamFps_,streamQuality_,
+                                                    streamQuality_==6?maxBitrateMbps_:0);
+                    it->second->send(reinterpret_cast<const std::byte*>(bytes.data()),bytes.size());
+                    desktopModeRpc_=id;++nextQualityRpc_;
+                    pendingVideoScale_.reset();videoScaleAttempted_=false;videoScaleVerified_=false;
+                    diagnostic(("desktop-mode-rpc-"+std::to_string(id)+"-screen-"+std::to_string(screen)+"-"+change).c_str());
+                }catch(const std::exception &){diagnostic("desktop-mode-rpc-invalid");}
+            }
+        }
     } else if(e=="capture-setting-sync") {
         const unsigned syncFields=data.value("fields",0u);
         const bool hasFps=bool(syncFields&1u),hasQuality=bool(syncFields&2u);
         const bool hasWidth=bool(syncFields&4u),hasHeight=bool(syncFields&8u);
         const bool hasBitrate=bool(syncFields&16u);
-        const int syncFps=data.value("fps",0)==1?30:(data.value("fps",0)==2?60:0);
+        const int syncFps=fpsFromTier(data.value("fps",0));
         const int syncQuality=data.value("quality",0);
         const int syncWidth=data.value("width",0),syncHeight=data.value("height",0);
         const int64_t syncBitrate=data.value("bitrate",int64_t(0));
@@ -739,7 +760,8 @@ void Client::handle(const Event &event) {
         const QualityApplicationTarget target{targetWidth,targetHeight,targetFps,targetQuality,targetCap};
         // Evidence is accumulated for the lifetime of the current request.
         // Split sync messages can therefore jointly prove a complete match.
-        if(hasFps)qualityApply_.evidence.observeFps(syncFps);
+        // The sync echoes the tier, not fpsCount: tier 4 only proves an exact 144.
+        if(hasFps && syncFps && !(syncFps==144 && targetFps!=144))qualityApply_.evidence.observeFps(syncFps);
         if(hasQuality)qualityApply_.evidence.observeQuality(syncQuality);
         if(hasWidth)qualityApply_.evidence.observeWidth(syncWidth);
         if(hasHeight)qualityApply_.evidence.observeHeight(syncHeight);
@@ -799,8 +821,7 @@ void Client::handle(const Event &event) {
     } else if (e == "quality-settings") {
         const int width = data.at("width").get<int>(), height = data.at("height").get<int>();
         const int fps = data.at("fps").get<int>(), quality = data.at("quality").get<int>();
-        if (!((width == 960 && height == 540) || (width == 1280 && height == 720) ||
-              (width == 1920 && height == 1080)) || (fps != 30 && fps != 60) || quality < 1 || quality > 6)
+        if (!streamSize(width,height) || !supportedCaptureRate(fps) || quality < 1 || quality > 6)
             throw std::runtime_error("画质设置无效");
         const bool vsync = data.value("vsync",true);
         const int playoutDelay=data.value("playout_delay_ms",state_.playoutDelayMs);
@@ -846,6 +867,10 @@ void Client::handle(const Event &event) {
         if(activeScreenId_<0){
             diagnostic("quality-current-screen-unavailable");
             reconnectQuality(target,"尚未收到电脑屏幕信息，正在重连应用…");return;
+        }
+        if(fps!=streamFps_ && !enumOnlyCaptureRate(fps)){
+            // The offer's decoder capability carries the frame rate; 120/144/164 renegotiate.
+            reconnectQuality(target,"正在重新连接以应用帧率…");return;
         }
         const auto id=nextQualityRpc_++;
         const bool qualityOnly=!resolutionChanged;
@@ -911,6 +936,10 @@ void Client::handle(const Event &event) {
             nextVideoScaleCheck_=0;
             setVideoScaleNotice("电脑已应答，正在核对实际视频尺寸");
             diagnostic("video-scale-acknowledged");return;
+        }
+        if(desktopModeRpc_ && data.at("id").get<uint64_t>()==desktopModeRpc_){
+            diagnostic(("desktop-mode-ack-errors-"+std::to_string(data.value("errors",0u))+"-code-"+std::to_string(data.value("code",0))).c_str());
+            return;
         }
         if(!pendingQuality_ || pendingQuality_->acknowledged || data.at("id").get<uint64_t>()!=pendingQuality_->id)return;
         const bool capture=data.value("capture",false);
@@ -1096,7 +1125,7 @@ void Client::handle(const Event &event) {
         } else
             setState("idle", "请先扫码登录");
     } else if (e == "connect" || e=="retry-connect") {
-        if(e=="connect") {reconnectArmed_=true;reconnectAttempts_=0;reconnectAt_=0;}
+        if(e=="connect") {reconnectArmed_=true;reconnectAttempts_=0;reconnectAt_=0;secondScreen_=data.value("secondScreen",false);}
         else if(!reconnectArmed_) return;
         connectedDeviceId_ = data.at("deviceId").get<std::string>();
         disconnect();
@@ -1426,7 +1455,8 @@ void Client::dispatch(const SioPacket &p) {
             if ((!remote_.is_string() && !remote_.is_number()) || remote_ == "")
                 throw std::runtime_error("房间内没有在线电脑");
             control_ = uuid();
-            auto options = connectOptions(streamWidth_, streamHeight_, streamFps_, streamQuality_,streamQuality_==6?maxBitrateMbps_:0,hevc_);
+            auto options = connectOptions(streamWidth_, streamHeight_, streamFps_, streamQuality_,streamQuality_==6?maxBitrateMbps_:0,hevc_,
+                                          secondScreen_?api_->device():std::string{});
             diagnostic(("encoder-bitrate-request-connect-bps-"+
                         std::to_string(streamQuality_==6?uint64_t(maxBitrateMbps_)*1000000u:0)+
                         "-quality-"+std::to_string(streamQuality_)).c_str());
@@ -1621,8 +1651,9 @@ void Client::beginPeer(const Json &result) {
     // HEVC is explicitly opt-in; H264 remains the default/manual fallback.
     if(hevc_ && configValue("receiver")=="legacy")
         throw std::runtime_error("H.265 需要严格接收器，请使用 H.264 或 receiver=strict");
-    if(hevc_) v.addH265Codec(96,"profile-id=1;tier-flag=0;level-id=123;tx-mode=SRST;sprop-max-don-diff=0");
-    else v.addH264Codec(96, "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f");
+    const auto levels=streamLevels(streamWidth_,streamHeight_,streamFps_);
+    if(hevc_) v.addH265Codec(96,"profile-id=1;tier-flag=0;level-id="+std::to_string(levels.hevc)+";tx-mode=SRST;sprop-max-don-diff=0");
+    else v.addH264Codec(96, std::string("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e0")+levels.avcHex);
     diagnostic(hevc_?"video-codec-offered-hevc-main":"video-codec-offered-h264");
     if (rtxEnabled_) {
         v.addRtxCodec(97, 96, 90000);
@@ -1722,7 +1753,8 @@ void Client::beginPeer(const Json &result) {
                 if(auto queue=inbox.lock()){
                     std::lock_guard lock(queue->mutex);
                     if(queue->events.size()>124)return;
-                    if(screens)queue->events.push_back({"quality-screens",{{"screen",screens->screenId},{"count",screens->count}},generation});
+                    if(screens)queue->events.push_back({"quality-screens",{{"screen",screens->screenId},{"count",screens->count},
+                        {"type",screens->type},{"width",screens->width},{"height",screens->height},{"modes",screens->modes}},generation});
                     if(settingSync)queue->events.push_back({"capture-setting-sync",
                         {{"fields",settingSync->fields},
                          {"fps",settingSync->fps},{"quality",settingSync->quality},
@@ -2068,7 +2100,7 @@ void Client::disconnect() {
     if(gamepadConnected_)input({{"action","gpd_disconnect"},{"index",0}});
     gamepadConnected_=false;nativeTouchActive_=false;touchPoints_=0;
     ++generation_;
-    activeScreenId_=-1;
+    activeScreenId_=-1;desktopModeRpc_=0;
     iceState_ = rtc::PeerConnection::IceState::New;
     deadline_ = 0;
     lastKeyframeRequest_ = 0;
@@ -2256,14 +2288,16 @@ void Client::tickVideoScale() {
             setVideoScaleNotice("尚未收到可显示画面；可返回并手动重连");
         return;
     }
-    if((media.width>1920 || media.height>1080) && state.videoScaleNotice.empty())
-        setVideoScaleNotice("电脑画面超出1080p，正在等待缩放；可返回并手动重连");
+    if((media.width>streamWidth_ || media.height>streamHeight_) && state.videoScaleNotice.empty())
+        setVideoScaleNotice("电脑画面大于所选尺寸，正在等待缩放；可返回并手动重连");
     if(!pendingVideoScale_ && media.width<=streamWidth_ && media.height<=streamHeight_ &&
        !state.videoScaleNotice.empty())
         setVideoScaleNotice("");
     const auto channel=channels_.find("TEXT_DATA_CHANNEL");
     if(channel==channels_.end() || !channel->second->isOpen())return;
-    if(activeScreenId_<0)return;
+    // The desktop size request already set the encoder size; a scale request on
+    // top makes the host put the old desktop size back (2026-11-02, d3 run).
+    if(activeScreenId_<0 || desktopModeRpc_)return;
 
     if(pendingVideoScale_){
         const auto &request=*pendingVideoScale_;

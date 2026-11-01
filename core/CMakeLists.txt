@@ -60,9 +60,11 @@ target_link_options(youyou_core PRIVATE -Wl,--no-undefined
                     "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/youyou_core.map")
 set_target_properties(youyou_core PROPERTIES LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/youyou_core.map")
 
-option(YY_TESTS "Build the hardware decode self-test (needs libavformat)" OFF)
+option(YY_TESTS "Build the self-tests (the decode test needs libavformat)" OFF)
 if(YY_TESTS)
     pkg_check_modules(AV REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil)
     add_executable(decode_test tests/decode_test.cpp)
     target_link_libraries(decode_test PRIVATE yy_core PkgConfig::AV)
+    add_executable(protocol_test tests/protocol_test.cpp)
+    target_link_libraries(protocol_test PRIVATE yy_core)
 endif()

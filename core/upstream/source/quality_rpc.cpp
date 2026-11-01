@@ -1,4 +1,5 @@
 #include "quality_rpc.hpp"
+#include "stream_limits.hpp"
 #include <limits>
 #include <cstring>
 #include <cmath>
@@ -163,11 +164,11 @@ Bytes videoQualitySettingRpc(uint64_t id,int quality){
     integer(out,1,id);integer(out,2,nowMs());message(out,21,rpc);return out;
 }
 Bytes captureSettingsRpc(uint64_t id,int w,int h,int fps,int quality,int screenId,int customMbps){
-    if(!id || screenId<0 || !((w==960&&h==540)||(w==1280&&h==720)||(w==1920&&h==1080)) ||
-       (fps!=30&&fps!=60) || quality<1 || quality>6 || customMbps<0 || customMbps>100 ||
+    if(!id || screenId<0 || !streamSize(w,h) ||
+       !supportedCaptureRate(fps) || quality<1 || quality>6 || customMbps<0 || customMbps>100 ||
        (quality==6 && customMbps==0) || (quality!=6 && customMbps!=0))throw std::invalid_argument("Invalid capture settings");
     Bytes capture,header,rpc,out;
-    integer(capture,1,fps==30?1:2);integer(capture,2,quality);integer(capture,3,1);
+    integer(capture,1,captureRateTier(fps));integer(capture,2,quality);integer(capture,3,1);
     // Preserve the 0.3.25 capture pacing fields; these keep the host frame
     // cadence regular and avoid batching in the decoder queue.
     integer(capture,12,0);
@@ -183,12 +184,26 @@ Bytes captureSettingsRpc(uint64_t id,int w,int h,int fps,int quality,int screenI
     integer(out,1,id);integer(out,2,nowMs());message(out,21,rpc);return out;
 }
 
+Bytes desktopModeRpc(uint64_t id,int screenId,int w,int h,int fps,int quality,int customMbps){
+    if(!id || screenId<0 || !streamSize(w,h) || !supportedCaptureRate(fps) || quality<1 || quality>6 ||
+       (quality==6 ? customMbps<1 || customMbps>100 : customMbps!=0))throw std::invalid_argument("Invalid desktop mode");
+    Bytes capture,header,rpc,out;
+    integer(capture,1,captureRateTier(fps));integer(capture,2,quality);integer(capture,3,1);
+    integer(capture,4,unsigned(screenId));integer(capture,5,w);integer(capture,6,h); // desktop timing
+    if(quality==6)integer(capture,8,uint64_t(customMbps)*1000000u);
+    integer(capture,10,4);integer(capture,12,0); // ChooseType_RESOLUTION, manual quality
+    integer(capture,14,w);integer(capture,15,h); // encoder limits
+    integer(capture,16,w);integer(capture,17,h);integer(capture,18,uint64_t(fps));
+    integer(header,1,id);message(rpc,1,header);message(rpc,2,capture);
+    integer(out,1,id);integer(out,2,nowMs());message(out,21,rpc);return out;
+}
+
 Bytes qualityUpdateRpc(uint64_t id,int fps,int quality,int screenId,int customMbps){
-    if(!id || screenId<0 || (fps!=30&&fps!=60) || quality<1 || quality>6 ||
+    if(!id || screenId<0 || !supportedCaptureRate(fps) || quality<1 || quality>6 ||
        customMbps<0 || customMbps>100 || (quality==6&&customMbps==0) ||
        (quality!=6&&customMbps!=0))throw std::invalid_argument("Invalid quality update");
     Bytes capture,header,rpc,out;
-    integer(capture,1,fps==30?1:2);integer(capture,2,quality);integer(capture,3,1);
+    integer(capture,1,captureRateTier(fps));integer(capture,2,quality);integer(capture,3,1);
     integer(capture,12,0);
     integer(capture,18,uint64_t(fps));
     integer(capture,4,unsigned(screenId));
@@ -202,15 +217,14 @@ Bytes qualityUpdateRpc(uint64_t id,int fps,int quality,int screenId,int customMb
 Bytes videoScaleRpc(uint64_t id,int sourceWidth,int sourceHeight,
                     int outputWidth,int outputHeight,int fps,int quality,
                     int screenId,int customMbps){
-    const bool outputSupported=(outputWidth==960&&outputHeight==540) ||
-        (outputWidth==1280&&outputHeight==720) || (outputWidth==1920&&outputHeight==1080);
+    const bool outputSupported=streamSize(outputWidth,outputHeight);
     if(!id || sourceWidth<1 || sourceHeight<1 || sourceWidth>16384 || sourceHeight>16384 ||
-       !outputSupported || screenId<0 || (fps!=30&&fps!=60) || quality<1 || quality>6 ||
+       !outputSupported || screenId<0 || !supportedCaptureRate(fps) || quality<1 || quality>6 ||
        customMbps<0 || customMbps>100 || (quality==6&&customMbps==0) ||
        (quality!=6&&customMbps!=0))
         throw std::invalid_argument("Invalid video scale request");
     Bytes capture,header,rpc,out;
-    integer(capture,1,fps==30?1:2);integer(capture,2,quality);integer(capture,3,1);
+    integer(capture,1,captureRateTier(fps));integer(capture,2,quality);integer(capture,3,1);
     integer(capture,12,0);
     integer(capture,18,uint64_t(fps));
     integer(capture,4,unsigned(screenId));
@@ -248,25 +262,46 @@ std::string screenSourceWireSummary(const uint8_t *data,size_t size) noexcept {
     if(!data || !size || size>65536) return {};
     try { return wireSummary(data,size,2); } catch(...) { return {}; }
 }
+// Screen.mode / Screen.current: fields 3/4 are the desktop size, 5/6 the
+// pixel size when the host scales the desktop.
+static bool displayDimensions(const Field &prop,int &width,int &height){
+    if(prop.wire!=2)return false;
+    Reader r(prop.data,prop.size);Field f;int dims[4]={};
+    while(r.next(f))if(f.key>=3 && f.key<=6){
+        if(f.wire!=0 || f.value>65535)return false;
+        dims[f.key-3]=int(f.value);
+    }
+    width=dims[2] && dims[3]?dims[2]:dims[0];height=dims[2] && dims[3]?dims[3]:dims[1];
+    return r.good();
+}
 std::optional<ScreenSourceInfo> parseScreenSources(const uint8_t *data,size_t size)noexcept{    if(!data || !size || size>65536)return {};
     bool found=false;ScreenSourceInfo result;
     Reader outer(data,size);Field f;
     while(outer.next(f))if(f.key==7){
         if(found || f.wire!=2)return {};found=true;
-        std::array<int,32> ids{};unsigned count=0;
+        std::array<int,32> ids{};unsigned count=0;std::vector<ScreenSourceInfo> screens;
         int current=0;bool currentPresent=false;
         Reader sources(f.data,f.size);Field source;
         while(sources.next(source)){
             if(source.key==1){
                 if(source.wire!=2 || count==ids.size())return {};
-                int id=0;bool idPresent=false;Reader screen(source.data,source.size);Field prop;
+                int id=0;bool idPresent=false;ScreenSourceInfo info;Reader screen(source.data,source.size);Field prop;
                 while(screen.next(prop))if(prop.key==1){
                     if(idPresent || prop.wire!=0 || prop.value>uint64_t(INT32_MAX))return {};
                     idPresent=true;id=int(prop.value);
+                }else if(prop.key==5 && prop.wire==0 && prop.value<=uint64_t(INT32_MAX)){
+                    info.type=int(prop.value);
+                }else if(prop.key==3 || prop.key==4){
+                    // Only the virtual display mode request reads these: a malformed
+                    // size must not cost the screen id the quality RPCs need.
+                    int w=0,h=0;
+                    if(!displayDimensions(prop,w,h))continue;
+                    if(prop.key==4){info.width=w;info.height=h;}
+                    else if(w && h && info.modes.size()<64)info.modes.emplace_back(w,h);
                 }
                 if(!screen.good())return {};
                 for(unsigned i=0;i<count;++i)if(ids[i]==id)return {};
-                ids[count++]=id;
+                ids[count++]=id;info.screenId=id;screens.push_back(std::move(info));
             }else if(source.key==2){
                 if(currentPresent || source.wire!=0)return {};
                 currentPresent=true;
@@ -277,7 +312,7 @@ std::optional<ScreenSourceInfo> parseScreenSources(const uint8_t *data,size_t si
         result.count=count;
         // Protobuf's omitted int32 ID is zero; it is accepted only when the
         // complete advertised list contains that same ID. Never guess a screen.
-        for(unsigned i=0;i<count;++i)if(current>=0 && ids[i]==current)result.screenId=current;
+        for(auto &s:screens)if(current>=0 && s.screenId==current){result=std::move(s);result.count=count;}
     }
     if(!outer.good() || !found)return {};
     return result;
@@ -293,7 +328,7 @@ std::optional<CaptureSettingSyncInfo> parseCaptureSettingSync(const uint8_t *dat
         while(body.next(v)){
             if(v.wire!=0)continue;
             switch(v.key){
-                case 1: if(v.value>2)return {}; result.fps=int(v.value);result.fields|=1u;break;
+                case 1: if(v.value>4)return {}; result.fps=int(v.value);result.fields|=1u;break;
                 case 2: if(v.value>6)return {}; result.quality=int(v.value);result.fields|=2u;break;
                 case 3: if(v.value>4)return {}; result.chroma=int(v.value);break;
                 case 4: if(v.value>uint64_t(std::numeric_limits<int64_t>::max()))return {}; result.maxCustomBitrate=int64_t(v.value);result.fields|=16u;break;

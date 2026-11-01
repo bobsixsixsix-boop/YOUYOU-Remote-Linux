@@ -280,7 +280,7 @@ int ConfigStore::integer(const std::string &key,int fallback,int minimum,int max
     }
     if(text.empty()) return fallback;
     if(key == "fps")
-        return config::choice(text, fallback, {30, 60});
+        return config::choice(text, fallback, {30, 60, 120, 144, 164});
     return config::integer(text, fallback, minimum, maximum);
 }
 void saveQualityConfig(int width, int height, int fps, int quality, bool vsync,

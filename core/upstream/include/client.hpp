@@ -116,6 +116,8 @@ class Client {
     int keyframeIntervalMs_ = 4000;
     int maxBitrateMbps_ = 0;
     bool hevc_ = false;
+    bool secondScreen_ = false; // connect as a dedicated desktop (virtual display)
+    uint64_t desktopModeRpc_ = 0; // this session's virtual display size request, 0 = not sent
     bool rembAvailable_ = false, bitrateFeedbackSent_ = false;
     unsigned rembTargetBps_ = 0;
     int64_t lastBitrateAttempt_ = 0;

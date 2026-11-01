@@ -1,0 +1,31 @@
+Real network, 2026-11-02. Y700 (panel 3040x1904 @ 120 Hz, base mode 120) over Wi-Fi to a Windows PC
+running NetEase GameViewer; dedicated desktop (CT_SECOND_SCREEN), HEVC, quality 6, cap 60 Mbps
+requested. youyou connect fullscreen, vsync off, no frame pacer, no uclamp. ml-flips.py (the
+Moonlight yardstick) for 30 s after 20 s settle. One sample each: indicative only.
+
+== d1: requested 2560x1600@120; host kept its remembered 2280x1428 virtual desktop and
+   encoded the 1440 tier, 2560x1440
+secs=30 iris_irq=272 crtcs={0: 3414}
+refresh 120.00 Hz, flips 113.8/s, iris IRQs 359.3/s
+flip interval (refreshes): 1: 3268 (95.75 %)  2: 115 (3.37 %)  3: 20 (0.59 %)  4+: 10 (0.29 %)
+avg 113.8 fps, 1 % low 37.4 fps, 0.1 % low 27.7 fps, worst frame 41.7 ms
+seconds with a repeated frame: 29/29; worst: t+5s x8, t+6s x8, t+14s x8, t+26s x8, t+7s x7
+phase ms/repeats per second: 0:3.1/3 1:3.4/1 2:5.5/2 3:5.5/1 4:3.1/3 5:2.9/8 6:3.0/8 7:3.0/7 8:3.0/7 9:5.3/7 10:3.7/6 11:3.1/5 12:2.8/3 13:3.1/2 14:3.1/8 15:5.4/7 16:5.5/4 17:3.5/7 18:3.3/5 19:3.1/3 20:3.4/7 21:5.5/3 22:5.5/0 23:5.2/5 24:3.5/7 25:3.0/6 26:3.4/8 27:4.3/7 28:5.4/2
+显示 5366 帧，跳过 21 帧 | 出解码器→交换完成 p50 0.5 p95 1.1 ms | 交换间隔 p50 8.34 p95 10.99 p99 21.54 最大 51.41 ms
+解码器: {"codec":"H.265","decodeMs":4.478552031555621,"decoded":5390,"dropped":0,"errors":0,"fps":119.54894184242852,"height":1440,"keyframes":13,"status":"V4L2 硬件解码 · 2560x1440","width":2560} | 收到 2560x1600@120 | 应用 {"bitrateMbps":100,"fps":0,"height":1440,"quality":6,"valid":true,"width":2560}
+
+== d3: requested 2280x1428@120; desktop size request moved the virtual display to 2280x1428,
+   then upstream's video scale request moved it back; the stream settled at 1920x1080
+   (fixed afterwards: no scale request once the desktop size was requested)
+secs=30 iris_irq=272 crtcs={0: 3530}
+refresh 120.00 Hz, flips 117.7/s, iris IRQs 360.1/s
+flip interval (refreshes): 0: 2 (0.06 %)  1: 3483 (98.70 %)  2: 29 (0.82 %)  3: 5 (0.14 %)  4+: 10 (0.28 %)
+avg 117.7 fps, 1 % low 42.9 fps, 0.1 % low 24.0 fps, worst frame 41.7 ms
+seconds with a repeated frame: 19/29; worst: t+11s x7, t+12s x5, t+19s x5, t+24s x3, t+25s x3
+phase ms/repeats per second: 0:1.7/0 1:2.1/0 2:1.8/0 3:1.9/0 4:5.8/0 5:6.3/1 6:2.3/1 7:1.8/0 8:3.1/2 9:6.8/2 10:7.2/1 11:7.1/7 12:6.6/5 13:1.9/2 14:6.3/0 15:7.0/2 16:7.3/0 17:7.1/2 18:6.9/1 19:2.6/5 20:2.5/0 21:6.5/1 22:7.1/1 23:7.0/2 24:7.2/3 25:6.5/3 26:6.4/1 27:6.4/0 28:6.6/0
+显示 5479 帧，跳过 29 帧 | 出解码器→交换完成 p50 0.5 p95 0.8 ms | 交换间隔 p50 8.34 p95 11.44 p99 16.76 最大 915.75 ms
+解码器: {"codec":"H.265","decodeMs":2.365850043065888,"decoded":5509,"dropped":0,"errors":0,"fps":104.2347087682237,"height":1080,"keyframes":17,"status":"V4L2 硬件解码 · 1920x1080","width":1920} | 收到 2280x1428@120 | 应用 {"bitrateMbps":60,"fps":0,"height":1440,"quality":6,"valid":true,"width":2560}
+
+Not comparable yet: d1 and d3 differ in resolution and in when the host changed modes.
+Next: 2280x1428@120 full run, then frame pacer and uclamp A/B (needs the PC's physical
+monitors switched off at their power buttons; see README).

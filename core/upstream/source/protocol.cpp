@@ -1,4 +1,5 @@
 #include "protocol.hpp"
+#include "stream_limits.hpp"
 #include <cctype>
 #include <chrono>
 #include <mbedtls/base64.h>
@@ -137,9 +138,9 @@ static void message(Bytes &b, int field, const Bytes &s) {
 static void text(Bytes &b, int field, const std::string &s) {
     message(b, field, Bytes(s.begin(), s.end()));
 }
-Bytes connectOptions(int w, int h, int fps, int quality, int customMbps, bool hevc) {
-    const bool supportedResolution=(w==960&&h==540)||(w==1280&&h==720)||(w==1920&&h==1080);
-    if (!supportedResolution)
+Bytes connectOptions(int w, int h, int fps, int quality, int customMbps, bool hevc,
+                     const std::string &secondScreenClient) {
+    if (!streamSize(w, h))
         throw std::invalid_argument("Unsupported capture resolution");
     if (quality < 1 || quality > 6 || customMbps < 0 || customMbps > 100 ||
         (quality == 6 && customMbps == 0) || (quality != 6 && customMbps != 0))
@@ -147,7 +148,7 @@ Bytes connectOptions(int w, int h, int fps, int quality, int customMbps, bool he
     Bytes resolution, capture, decoder, out;
     integer(resolution, 1, w);
     integer(resolution, 2, h);
-    integer(capture, 1, fps == 30 ? 1 : 2);
+    integer(capture, 1, captureRateTier(fps));
     integer(capture, 2, quality);
     integer(capture, 3, 1);
     // Start in FOLLOW_REMOTE so the initial desktop is not switched to 720.
@@ -173,11 +174,14 @@ Bytes connectOptions(int w, int h, int fps, int quality, int customMbps, bool he
     integer(decoder, 2, hevc ? 2 : 1);
     integer(decoder, 3, w);
     integer(decoder, 4, h);
-    integer(out, 1, 1);
+    // CT_SECOND_SCREEN: the host adds a virtual display for this session and keeps
+    // its place in the layout per client (field 9); CT_DESKTOP streams a monitor.
+    integer(out, 1, secondScreenClient.empty() ? 1 : 6);
     integer(out, 2, uint64_t(-1));
     message(out, 3, capture);
     message(out, 4, decoder);
     integer(out, 8, 2);
+    if (!secondScreenClient.empty()) text(out, 9, secondScreenClient);
     return out;
 }
 Bytes launchApp(uint64_t seq, const Json &app) {

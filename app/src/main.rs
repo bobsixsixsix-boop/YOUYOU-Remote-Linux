@@ -22,7 +22,8 @@ const USAGE: &str = "用法：
   youyou connect [电脑名或设备 ID]       全屏串流（默认第一台在线的电脑）
   youyou play <片段.h264|.hevc> [帧率]   不联网的解码与显示自测（默认 120 帧）
   youyou import-apk <官方电视版 APK> | import-key <signing.key> | download-key
-界面做好前的临时开关：YY_VSYNC=1 开垂直同步（默认关），YY_TOUCH=mouse 触屏当鼠标用";
+界面做好前的临时开关：YY_VSYNC=1 开垂直同步（默认关），YY_TOUCH=mouse 触屏当鼠标用，
+  YY_STREAM=2560x1600@120 串流尺寸与帧率，YY_MBPS=60 码率上限，YY_DESKTOP=1 用专用桌面（电脑新建一块虚拟屏）";
 const TOUCH_MOUSE: u32 = u32::MAX; // SDL_TOUCH_MOUSEID: mouse events synthesized from touch
 
 fn main() {
@@ -51,8 +52,15 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 .into_iter()
                 .find(|d| arg(1).map_or(online(d), |want| d["device_id"] == want || d["alias"] == want))
                 .ok_or("没有找到要连接的电脑（youyou devices 看列表）")?;
-            core.command("connect", &json!({"deviceId": device["device_id"]})).map_err(text)?;
-            show(&sdl()?, Some(&core))
+            if let Ok(spec) = std::env::var("YY_STREAM") {
+                let mbps = std::env::var("YY_MBPS").ok().and_then(|m| m.parse().ok()).unwrap_or(0);
+                core.command("quality-settings", &stream_settings(&spec, mbps).ok_or(USAGE)?).map_err(text)?;
+            }
+            let desktop = std::env::var("YY_DESKTOP").is_ok_and(|v| v == "1");
+            core.command("connect", &json!({"deviceId": device["device_id"], "secondScreen": desktop})).map_err(text)?;
+            let shown = show(&sdl()?, Some(&core));
+            disconnect(&core);
+            shown
         }
         Some("import-apk") => youyou_account::import_apk(path(1)?).map_err(text),
         Some("import-key") => youyou_account::import_key(path(1)?).map_err(text),
@@ -89,6 +97,21 @@ fn devices(core: &Core) -> Result<Vec<Value>, String> {
     }
 }
 
+/// Ends the session with the computer. Dropping the core alone does not: the
+/// computer would stay "being controlled" until its heartbeat times out.
+fn disconnect(core: &Core) {
+    let device = core.snapshot()["activeDeviceId"].clone();
+    if device.as_str().is_none_or(str::is_empty) {
+        return;
+    }
+    let _ = core.command("disconnect", &json!({"restoreSound": false, "deviceId": device}));
+    // Upstream clears activeDeviceId as the last step of its disconnect.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while core.snapshot()["activeDeviceId"].as_str().is_some_and(|d| !d.is_empty()) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn online(device: &Value) -> bool {
     device["status"] != "offline"
 }
@@ -122,6 +145,17 @@ fn play(path: &Path, fps: f64) -> Result<(), String> {
         let _ = sender.push_event(Event::Quit { timestamp: 0 });
     });
     show(&sdl, None)
+}
+
+/// "2560x1600@120" (+ a bitrate cap in Mbps, 0 = the host's own quality
+/// preset) as upstream's quality-settings command. H.265: the Y700 decodes it
+/// faster than H.264 (tools/results/20261102-decode-latency.txt).
+fn stream_settings(spec: &str, mbps: u32) -> Option<Value> {
+    let (size, fps) = spec.split_once('@')?;
+    let (width, height) = size.split_once('x')?;
+    let (width, height, fps): (u32, u32, u32) = (width.parse().ok()?, height.parse().ok()?, fps.parse().ok()?);
+    let quality = if mbps > 0 { 6 } else { 3 }; // 3 = upstream's default preset
+    Some(json!({"width": width, "height": height, "fps": fps, "quality": quality, "max_bitrate_mbps": mbps, "hevc": true}))
 }
 
 fn now_us() -> i64 {
@@ -233,6 +267,10 @@ fn show(sdl: &sdl2::Sdl, core: Option<&Core>) -> Result<(), String> {
             match event {
                 Event::Quit { .. } => {
                     eprintln!("{}", stats.report());
+                    if let Some(core) = core {
+                        let s = core.snapshot();
+                        eprintln!("解码器: {} | 收到 {}x{}@{} | 应用 {}", s["media"], s["width"], s["height"], s["fps"], s["applied"]);
+                    }
                     return Ok(());
                 }
                 Event::User { type_, .. } if type_ == frame_ready => fresh = true,
@@ -346,5 +384,18 @@ fn show(sdl: &sdl2::Sdl, core: Option<&Core>) -> Result<(), String> {
                 stage = now;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_stream_settings() {
+        let s = stream_settings("2560x1600@120", 60).unwrap();
+        assert_eq!((s["width"].as_u64(), s["height"].as_u64(), s["fps"].as_u64()), (Some(2560), Some(1600), Some(120)));
+        assert_eq!((s["quality"].as_u64(), s["max_bitrate_mbps"].as_u64()), (Some(6), Some(60)));
+        assert_eq!(stream_settings("1920x1080@60", 0).unwrap()["quality"], 3);
+        assert!(stream_settings("2560x1600", 0).is_none() && stream_settings("2560*1600@120", 0).is_none());
     }
 }
