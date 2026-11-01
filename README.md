@@ -31,7 +31,7 @@ v0.1.15 把上游的 Switch 程序整个移植成一个 Linux 程序，再在里
 | `app/src/clip.rs` | `youyou play` 用：把 Annex-B 文件切成访问单元。 |
 | `app/src/main.rs` | 命令行入口、SDL 窗口与事件循环、统计。 |
 | `account/` | 账号材料（APK 提取签名、client-id、单实例锁），v0.2 直接复用。 |
-| `tools/` | `decbench.c`、`v4l2bench.c`（解码延迟对比）、`pacing-run.sh`（上屏节奏），结果在 `tools/results/`。 |
+| `tools/` | 测量工具，结果在 `tools/results/`：<br>• `decbench.c`、`v4l2bench.c`：解码延迟对比。<br>• `pacing-run.sh`：本地片段的上屏节奏。跑完把面板切回原来的模式。<br>• `desktop-run.py` + `stream-run.sh`：真网络专用桌面测量。电脑端跑前者，它在平板上启动后者；测前先按电源键关掉电脑的物理显示器。原始输出在 `tools/results/runs/`，不进 git。`desktop-run.py` 是本次测试脚本去掉「停用物理屏」逻辑后的版本，这个形态还没整轮跑过。 |
 
 根目录的 `src/`、`native/`、`player/`、`build.rs`、`Cargo.toml`、`packaging/`、`integrations/` 是 v0.1.15，只留作对照，v0.2 做完后删除。`player/src/input.rs` 已经移到 `app/`，所以这棵旧树在 main 上编不过；要构建 v0.1.15，用 tag `v0.1.15`。
 

@@ -2,15 +2,18 @@
 # Runs on the Y700 as root: what reaches the panel (KWin flips, via y700's
 # linux/streaming/ml-flips.py) while `youyou play` shows a 120 fps HEVC
 # 2560x1600 clip, per panel rate (164/120 Hz) and vsync. Needs the clips in
-# /tmp/yydec (hevc-2560.hevc) and the build in /root/yybuild. Restores 164 Hz.
-# y700-refresh-auto takes each kscreen-doctor switch as a new base rate; ending on
-# 164 puts its base back. Do not run it while someone uses the tablet: 164<->120
-# is a full modeset (the screen blinks) and shakes out ghost touches.
+# /tmp/yydec (hevc-2560.hevc) and the build in /root/yybuild. Puts the panel
+# back to the mode it had: y700-refresh-auto takes each kscreen-doctor switch as
+# its new base rate, so ending on another mode would change the owner's base.
+# Do not run it while someone uses the tablet: 164<->120 is a full modeset (the
+# screen blinks) and shakes out ghost touches.
 set -u
 export LC_ALL=C
 as_user() { runuser -u pocketds -- env -i HOME=/home/pocketds PATH=/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/1000 \
   WAYLAND_DISPLAY=wayland-0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "$@"; }
-trap 'as_user kscreen-doctor output.DSI-1.mode.2 >/dev/null 2>&1' EXIT
+BASE=$(as_user kscreen-doctor -j 2>/dev/null | python3 -c 'import json, sys
+print(next(o["currentModeId"] for o in json.load(sys.stdin)["outputs"] if o["name"] == "DSI-1"))') || exit 1
+trap 'as_user kscreen-doctor output.DSI-1.mode.$BASE >/dev/null 2>&1' EXIT
 cd /tmp/yydec
 [ -f long-2560.hevc ] || for i in 1 2 3 4 5 6 7 8; do cat hevc-2560.hevc; done > long-2560.hevc
 ffmpeg -loglevel error -y -f lavfi -i smptebars=size=1920x1080:rate=120 -t 3 -c:v libx264 -preset fast -bf 0 -g 120 \
