@@ -1,0 +1,34 @@
+# Decode latency on the Y700 (2026-11-02, kernel 7.3.0-tb323fu-t52-y17, qcom-va-driver v1.1.1 35eff37, FFmpeg 8.0.1)
+# Clips: testsrc2 3 s @120 fps; x264/x265 -tune zerolatency (no B-frames), SVT-AV1 pred-struct=1 (low delay) CBR.
+# READY = AU queued -> picture usable for display (VA-API: after av_hwframe_map, which syncs the surface).
+# decbench.c (FFmpeg, single thread). v4l2m2m rows are quantized to the 8.33 ms feed interval by that
+# single-threaded harness, so treat them as an upper bound; v4l2bench.c measures the direct path exactly.
+
+## decbench (tools/decbench.c)
+h264 vaapi 1920x1080 sent=360 got=360 timed=360 depth=0 | received p50=4.70 | READY ms p50=9.77 p95=11.49 p99=12.75 max=17.23 | map avg=4.68 max=7.23 fail=0 | objects=1 layers=2 fourcc=R8   planes=1 modifier=0x0
+h264_v4l2m2m v4l2m2m 1920x1080 sent=360 got=360 timed=360 depth=2 | received p50=8.39 | READY ms p50=8.39 p95=8.61 p99=9.13 max=16.69 | map avg=0.00 max=0.00 fail=0 | sysmem nv12
+h264 sw 1920x1080 sent=360 got=360 timed=360 depth=0 | received p50=6.10 | READY ms p50=6.10 p95=6.44 p99=6.85 max=8.89 | map avg=0.00 max=0.00 fail=0 | sysmem yuv420p
+hevc vaapi 1920x1080 sent=360 got=360 timed=360 depth=0 | received p50=4.57 | READY ms p50=7.64 p95=9.26 p99=9.76 max=16.29 | map avg=3.01 max=4.35 fail=0 | objects=1 layers=2 fourcc=R8   planes=1 modifier=0x0
+hevc_v4l2m2m v4l2m2m 1920x1080 sent=360 got=360 timed=360 depth=1 | received p50=8.36 | READY ms p50=8.36 p95=8.63 p99=9.23 max=12.70 | map avg=0.00 max=0.00 fail=0 | sysmem nv12
+hevc sw 1920x1080 sent=360 got=360 timed=360 depth=0 | received p50=6.14 | READY ms p50=6.14 p95=6.67 p99=8.92 max=9.38 | map avg=0.00 max=0.00 fail=0 | sysmem yuv420p
+hevc vaapi 2560x1600 sent=360 got=360 timed=360 depth=0 | received p50=6.50 | READY ms p50=12.12 p95=14.26 p99=15.04 max=22.17 | map avg=5.26 max=7.21 fail=0 | objects=1 layers=2 fourcc=R8   planes=1 modifier=0x0
+hevc_v4l2m2m v4l2m2m 2560x1600 sent=360 got=360 timed=360 depth=2 | received p50=8.39 | READY ms p50=8.39 p95=8.73 p99=9.52 max=16.69 | map avg=0.00 max=0.00 fail=0 | sysmem nv12
+hevc sw 2560x1600 sent=360 got=360 timed=360 depth=0 | received p50=6.53 | READY ms p50=6.53 p95=7.04 p99=9.74 max=13.82 | map avg=0.00 max=0.00 fail=0 | sysmem yuv420p
+av1 vaapi 1920x1080 sent=360 got=360 timed=360 depth=0 | received p50=0.64 | READY ms p50=4.90 p95=5.93 p99=6.52 max=15.41 | map avg=3.79 max=5.61 fail=0 | objects=1 layers=2 fourcc=R8   planes=1 modifier=0x0
+libdav1d sw 1920x1080 sent=360 got=360 timed=360 depth=0 | received p50=4.96 | READY ms p50=4.96 p95=8.83 p99=9.29 max=11.80 | map avg=0.00 max=0.00 fail=0 | sysmem yuv420p
+av1 vaapi 1920x1080 sent=360 got=360 timed=360 depth=0 | received p50=0.37 | READY ms p50=2.04 p95=14.70 p99=26.27 max=27.12 | map avg=3.06 max=23.83 fail=0 | objects=1 layers=2 fourcc=R8   planes=1 modifier=0x0
+libdav1d sw 1920x1080 sent=360 got=360 timed=360 depth=0 | received p50=2.20 | READY ms p50=2.20 p95=34.23 p99=41.09 max=42.49 | map avg=0.00 max=0.00 fail=0 | sysmem yuv420p
+
+## v4l2bench (tools/v4l2bench.c), two runs each
+v4l2 h264 1920x1080 sent=360 got=360 late=0 srcchg=1 | READY ms p50=5.59 p95=6.28 p99=7.40 max=9.06 | capture 1920x1088 NV12 (native NV12) planes=1 stride=1920 bufs=7 expbuf=ok
+v4l2 h264 1920x1080 sent=360 got=360 late=0 srcchg=1 | READY ms p50=5.58 p95=6.35 p99=6.91 max=7.95 | capture 1920x1088 NV12 (native NV12) planes=1 stride=1920 bufs=7 expbuf=ok
+v4l2 hevc 1920x1080 sent=360 got=360 late=0 srcchg=1 | READY ms p50=3.71 p95=4.24 p99=4.71 max=7.27 | capture 1920x1088 NV12 (native NV12) planes=1 stride=1920 bufs=9 expbuf=ok
+v4l2 hevc 1920x1080 sent=360 got=360 late=0 srcchg=1 | READY ms p50=3.71 p95=4.20 p99=5.84 max=9.56 | capture 1920x1088 NV12 (native NV12) planes=1 stride=1920 bufs=9 expbuf=ok
+v4l2 hevc 2560x1600 sent=360 got=360 late=0 srcchg=1 | READY ms p50=4.56 p95=5.92 p99=6.41 max=7.85 | capture 2560x1600 NV12 (native NV12) planes=1 stride=2560 bufs=9 expbuf=ok
+v4l2 hevc 2560x1600 sent=360 got=360 late=0 srcchg=1 | READY ms p50=4.52 p95=5.36 p99=6.53 max=7.68 | capture 2560x1600 NV12 (native NV12) planes=1 stride=2560 bufs=9 expbuf=ok
+v4l2 av1 1920x1080 sent=360 got=360 late=0 srcchg=1 | READY ms p50=4.43 p95=5.04 p99=5.32 max=5.71 | capture 1920x1088 NV12 (native NV12) planes=1 stride=1920 bufs=8 expbuf=ok
+v4l2 av1 1920x1080 sent=360 got=360 late=0 srcchg=1 | READY ms p50=4.40 p95=4.94 p99=5.36 max=5.77 | capture 1920x1088 NV12 (native NV12) planes=1 stride=1920 bufs=8 expbuf=ok
+
+## Verdict
+Direct stateful V4L2 + VIDIOC_EXPBUF is 1.1x (AV1) to 2.7x (HEVC 2560x1600) lower latency than VA-API
+(qcom-va-driver spends ~4.6 ms inside send_packet for H.264/HEVC alone). The player decodes through V4L2 directly.
