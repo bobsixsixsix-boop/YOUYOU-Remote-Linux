@@ -13,3 +13,4 @@ diag/
 telemetry.ini
 __pycache__/
 /tools/results/runs/
+/out/
