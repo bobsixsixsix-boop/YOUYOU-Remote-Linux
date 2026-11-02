@@ -16,7 +16,7 @@ arch=$(dpkg --print-architecture)
 stage=$(mktemp -d)
 trap 'rm -rf -- "$stage"' EXIT
 chmod 755 "$stage" # mktemp's 0700 would be the package's ./ entry
-mkdir "$stage/DEBIAN" # dpkg-shlibdeps resolves $ORIGIN against the tree that has it
+mkdir "$stage/DEBIAN" # dpkg-shlibdeps resolves $ORIGIN against the tree that has it (absolute paths below)
 
 lib=$stage/usr/lib/youyou-linux doc=$stage/usr/share/doc/youyou-linux
 install -Dm755 "$bin" "$lib/youyou"
@@ -32,7 +32,7 @@ python3 packaging/licenses.py "$doc/copyright"
 # Shared-library versions from the binaries themselves; SDL opens EGL/GLES at run time, the
 # interface runs fc-match and needs a CJK font, libcurl needs the CA bundle.
 mkdir -p "$stage/debian" && printf 'Source: youyou-linux\n\nPackage: youyou-linux\nArchitecture: any\n' > "$stage/debian/control"
-shlibs=$(cd "$stage" && dpkg-shlibdeps -O -l"$PWD/usr/lib/youyou-linux" usr/lib/youyou-linux/youyou usr/lib/youyou-linux/libyouyou_core.so | sed -n 's/^shlibs:Depends=//p')
+shlibs=$(cd "$stage" && dpkg-shlibdeps -O -l"$lib" "$lib/youyou" "$lib/libyouyou_core.so" | sed -n 's/^shlibs:Depends=//p')
 rm -r "$stage/debian"
 [ -n "$shlibs" ] || { echo "deb.sh: dpkg-shlibdeps found nothing" >&2; exit 1; }
 size=$(du -sk --exclude=DEBIAN "$stage" | cut -f1)
