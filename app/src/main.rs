@@ -51,7 +51,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         Some("devices") => {
             for d in devices(&session()?)? {
                 let state = if online(&d) { "在线" } else { "离线" };
-                println!("{}\t{state}\t{}", d["device_id"].as_str().unwrap_or(""), d["alias"].as_str().unwrap_or(""));
+                println!("{}\t{state}（{}）\t{}", d["device_id"].as_str().unwrap_or(""), d["status"], d["alias"].as_str().unwrap_or(""));
             }
             Ok(())
         }
@@ -164,8 +164,10 @@ fn disconnect(core: &Core) {
     }
 }
 
+/// TV 3.5.0 (upstream live_frontend.inc, docs/user-guide.md): only the exact status
+/// "CONNECTED" is online, anything else is offline. Checking for "offline" showed offline PCs as online.
 fn online(device: &Value) -> bool {
-    device["status"] != "offline"
+    device["status"] == "CONNECTED"
 }
 
 /// The app's own choices (upstream keeps the stream settings in its config.ini),
@@ -701,5 +703,12 @@ mod tests {
         assert_eq!((s["quality"].as_u64(), s["max_bitrate_mbps"].as_u64()), (Some(6), Some(60)));
         assert_eq!(stream_settings("1920x1080@60", 0).unwrap()["quality"], 3);
         assert!(stream_settings("2560x1600", 0).is_none() && stream_settings("2560*1600@120", 0).is_none());
+    }
+    #[test]
+    fn only_connected_is_online() {
+        assert!(online(&json!({"status": "CONNECTED"})));
+        for d in [json!({"status": "DISCONNECTED"}), json!({"status": "connected"}), json!({"status": 1}), json!({})] {
+            assert!(!online(&d), "{d}");
+        }
     }
 }
