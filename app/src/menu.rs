@@ -7,6 +7,8 @@ pub enum Action {
     Close,
     Disconnect,
     Touch(bool),
+    /// Stream this host screen id instead.
+    Screen(i64),
     /// Windows display scale of the dedicated desktop, in percent.
     Scale(u32),
     /// Upstream PrivacyMode: 1 normal display, 2 privacy screensaver, 3 display off.
@@ -55,6 +57,23 @@ pub fn drawer(ui: &mut Ui, open: bool, side: f32, alias: &str, s: &Value, touch_
     ui.rect(Rect::new(x, y, cw, 1.0), 0.0, LINE);
     y += 28.0;
 
+    let sc = &s["screens"];
+    let list = sc["list"].as_array().map_or(&[][..], Vec::as_slice);
+    if list.len() > 1 {
+        ui.text("显示器", x, y + 10.0, 17.0, true, INK, 0.0);
+        y += 32.0;
+        let (labels, ids) = screen_labels(list);
+        let want = sc["requested"].as_i64().filter(|&v| v >= 0).or(sc["current"].as_i64());
+        let (pick, used) = ui.chips("menu/screen", x, y, cw, &labels, ids.iter().position(|&v| Some(v) == want));
+        if let Some(i) = pick {
+            action = Some(Action::Screen(ids[i]));
+        }
+        y += used;
+        let notice = sc["notice"].as_str().unwrap_or("");
+        y += if notice.is_empty() { 0.0 } else { ui.paragraph(notice, x, y + 8.0, cw, 14.0, MUTED, 0.0) + 8.0 };
+        y += 32.0;
+    }
+
     ui.text("触屏", x, y + 10.0, 17.0, true, INK, 0.0);
     y += 32.0;
     let labels = ["多点触控".to_string(), "桌面鼠标".to_string()];
@@ -102,6 +121,31 @@ pub fn drawer(ui: &mut Ui, open: bool, side: f32, alias: &str, s: &Value, touch_
     (t, action.filter(|_| open))
 }
 
+/// Chip labels and ids for the host's screens: monitors numbered in the host's
+/// order with their refresh rate ("1 · 480 Hz"; the host only gives the size of the
+/// streamed screen, so that is the fallback), the virtual display as 专用桌面 and
+/// GameViewer's tablet-sized stand-in for the whole desktop as 超级屏.
+fn screen_labels(list: &[Value]) -> (Vec<String>, Vec<i64>) {
+    let mut n = 0;
+    list.iter()
+        .filter_map(|v| {
+            let id = v["id"].as_i64()?;
+            match v["type"].as_i64() {
+                Some(1) => return Some(("专用桌面".to_string(), id)),
+                Some(2) => return Some(("超级屏".to_string(), id)),
+                _ => {}
+            }
+            n += 1;
+            let u = |k: &str| v[k].as_u64().unwrap_or(0);
+            Some(match (u("fps"), u("width"), u("height")) {
+                (f, _, _) if f > 0 => (format!("{n} · {f} Hz"), id),
+                (_, w, h) if w > 0 && h > 0 => (format!("{n} · {w}×{h}"), id),
+                _ => (format!("显示器 {n}"), id),
+            })
+        })
+        .unzip()
+}
+
 /// The three privacy chips and the host's last answer under them.
 fn privacy(ui: &mut Ui, x: f32, y: f32, cw: f32, p: &Value, action: &mut Option<Action>) {
     let labels = ["正常显示".to_string(), "隐私屏保".to_string(), "关闭显示屏".to_string()];
@@ -127,4 +171,24 @@ pub fn status(ui: &mut Ui, title: &str, detail: &str, error: bool) -> bool {
     ui.paragraph(detail, r.x + 32.0, r.y + 76.0, pw - 64.0, 16.0, if error { RED } else { MUTED }, 0.0);
     ui.button("status/cancel", Rect::new(r.x + pw - 32.0 - 140.0, r.y + ph - 32.0 - 52.0, 140.0, 52.0), "取消", None, Kind::Plain, true)
         || ui.back
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn screen_labels_number_monitors_only() {
+        let list = [
+            json!({"id": 0, "type": 0, "width": 0, "height": 0, "fps": 480}),
+            json!({"id": 1, "type": 0, "width": 2560, "height": 1440}),
+            json!({"id": 14, "type": 1, "width": 2560, "height": 1600, "fps": 144}),
+            json!({"id": 2, "type": 0}),
+            json!({"type": 0}),
+            json!({"id": 15, "type": 2, "fps": 144}),
+        ];
+        let (labels, ids) = screen_labels(&list);
+        assert_eq!(labels, ["1 · 480 Hz", "2 · 2560×1440", "专用桌面", "显示器 3", "超级屏"]);
+        assert_eq!(ids, [0, 1, 14, 2, 15]);
+    }
 }

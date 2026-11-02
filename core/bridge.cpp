@@ -138,6 +138,8 @@ extern "C" char *yy_snapshot(void) {
             {"desktopScale", {{"virtual", s.desktopVirtual}, {"current", s.desktopScale},
                               {"recommended", s.desktopScaleRecommended}, {"options", s.desktopScales},
                               {"requested", s.desktopScaleRequested}, {"notice", s.desktopScaleNotice}}},
+            {"screens", {{"list", s.screens}, {"current", s.screenCurrent},
+                         {"requested", s.screenRequested}, {"notice", s.screenNotice}}},
             {"text", {{"pending", s.textPending}, {"revision", s.textRevision}, {"result", s.textResult},
                       {"notice", s.textNotice}}},
             {"media", {{"status", c.media->status()}, {"decoder", m.decoder}, {"codec", m.codec},

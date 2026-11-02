@@ -9,6 +9,7 @@
 #include "video_assembler.hpp"
 #include "strict_video_receiver.hpp"
 #include <functional>
+#include <map>
 #include <rtc/rtc.hpp>
 #include <set>
 #include <optional>
@@ -27,6 +28,11 @@ struct Snapshot {
     int desktopScale=0,desktopScaleRecommended=0,desktopScaleRequested=0;
     std::vector<int> desktopScales;
     std::string desktopScaleNotice;
+    // The host's screens ([{id,type,width,height}]), the streamed one, and a
+    // select-screen request waiting for the host (-1 = none).
+    Json screens=Json::array();
+    int screenCurrent=-1,screenRequested=-1;
+    std::string screenNotice;
     bool textPending=false;
     uint64_t textRevision=0;
     int textResult=0; // 0=idle, 1=pending, 2=paste submitted, 3=failed/cancelled.
@@ -161,6 +167,19 @@ class Client {
     void saveIceDiagnostics();
     struct PendingPrivacy {uint64_t id;int64_t deadline;PrivacyMode mode;};
     std::optional<PendingPrivacy> pendingPrivacy_;
+    struct PendingScreen {uint64_t id;int64_t deadline;int target;bool quitting=false;};
+    std::optional<PendingScreen> pendingScreen_;
+    // A screen picked from the drawer streams at its own size: GameViewer answers a scale request
+    // on a physical monitor by putting its super screen back, and right after the super screen
+    // returns the decoder still reports the last monitor's size, so a request then got us 1920x1080 (2026-11-02).
+    bool pickedScreen_=false;
+    std::map<int,int> hostDisplays_; // forward_setting display_info this session: id -> refresh rate
+    Json sourceScreens_=Json::array(); // the last screen list's entries
+    int superScreen_=-1; // the super screen's id once seen; it leaves the screen list when quit
+    int64_t screenCheckAt_=0; // when to check that the newly picked screen sends frames
+    void publishScreens();
+    void finishScreen(const std::string &notice);
+    bool sendScreenRpc(int target,bool quit);
     bool rtxEnabled_ = false;
     bool sdpDumpDone_ = false;
     Json qr_;

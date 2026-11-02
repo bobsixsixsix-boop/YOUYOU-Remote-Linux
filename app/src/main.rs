@@ -678,6 +678,11 @@ fn stream(screen: &mut Screen, core: Option<&Core>, device: &Value, prefs: &mut 
                 prefs.save();
                 input.set_desktop_mouse(on).into_iter().for_each(send);
             }
+            Some(menu::Action::Screen(id)) => {
+                if let Some(core) = core {
+                    let _ = core.command("select-screen", &json!({"screen": id}));
+                }
+            }
             Some(menu::Action::Scale(scale)) => {
                 if let Some(core) = core {
                     let _ = core.command("desktop-scale", &json!({"scale": scale}));

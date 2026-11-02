@@ -136,7 +136,7 @@ struct Media::Impl {
     int fd = -1;
     bool hevc = false, waitKey = true, failed = false, capOn = false, pollable = true;
     unsigned capPlanes = 1;
-    uint32_t stride = 0, uvOffset = 0, visibleWidth = 0, visibleHeight = 0;
+    uint32_t stride = 0, uvOffset = 0, visibleWidth = 0, visibleHeight = 0, codedWidth = 0, codedHeight = 0;
     std::array<void *, kOutBuffers> outMap{};
     std::array<size_t, kOutBuffers> outLength{};
     std::vector<uint32_t> outFree;
@@ -363,8 +363,23 @@ struct Media::Impl {
     void service(short revents) {
         if (revents & POLLPRI) {
             v4l2_event ev{};
-            while (fd >= 0 && !xioctl(fd, VIDIOC_DQEVENT, &ev))
-                if (ev.type == V4L2_EVENT_SOURCE_CHANGE && !setupCapture()) return;
+            while (fd >= 0 && !xioctl(fd, VIDIOC_DQEVENT, &ev)) {
+                if (ev.type != V4L2_EVENT_SOURCE_CHANGE) continue;
+                // iris decoded nothing after a mid-stream 2280x1428 -> 2560x1440 change with the capture
+                // queue redone in place (an error per frame, 2026-11-02); a fresh device starts at the next IDR.
+                // The host also repeats the event at the same size a few seconds into each stream: that
+                // one is redone in place, as it always was.
+                v4l2_format f{};
+                f.type = CAP;
+                if (capOn && (xioctl(fd, VIDIOC_G_FMT, &f) || f.fmt.pix_mp.width != codedWidth ||
+                              f.fmt.pix_mp.height != codedHeight)) {
+                    diagnostic("v4l2-reopen-on-source-change");
+                    closeDevice();
+                    keyframeRequested = true;
+                    return;
+                }
+                if (!setupCapture()) return;
+            }
         }
         if (fd >= 0 && (revents & POLLOUT))
             for (;;) {
@@ -413,6 +428,8 @@ struct Media::Impl {
         v4l2_format f{};
         f.type = CAP;
         if (xioctl(fd, VIDIOC_G_FMT, &f)) return fail("G_FMT capture");
+        codedWidth = f.fmt.pix_mp.width;
+        codedHeight = f.fmt.pix_mp.height;
         // The decoder spec's visible rectangle is the CAPTURE crop. Read it before
         // S_FMT, which resets it to the coded size on iris; drivers differ on
         // whether they take the single- or multi-planar type here.

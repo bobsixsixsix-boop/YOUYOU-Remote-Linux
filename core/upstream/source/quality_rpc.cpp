@@ -198,6 +198,37 @@ Bytes desktopModeRpc(uint64_t id,int screenId,int w,int h,int fps,int quality,in
     integer(out,1,id);integer(out,2,nowMs());message(out,21,rpc);return out;
 }
 
+Bytes selectScreenRpc(uint64_t id,int screenId,int fps,int quality,bool hevc,int maxWidth,int maxHeight,int customMbps){
+    if(!id || screenId<0 || !supportedCaptureRate(fps) || quality<1 || quality>6 || !streamSize(maxWidth,maxHeight) ||
+       (quality==6 ? customMbps<1 || customMbps>100 : customMbps!=0))throw std::invalid_argument("Invalid screen selection");
+    Bytes capture,header,rpc,out;
+    integer(capture,1,captureRateTier(fps));integer(capture,2,quality);integer(capture,3,1);
+    integer(capture,4,unsigned(screenId));
+    integer(capture,5,uint64_t(-1));integer(capture,6,uint64_t(-1)); // let the host size it
+    if(quality==6)integer(capture,8,uint64_t(customMbps)*1000000u);
+    integer(capture,10,1);integer(capture,12,0); // ChooseType_DEFAULT, manual quality
+    integer(capture,13,hevc?2:1); // our negotiated track's codec, as the official app sends
+    integer(capture,14,maxWidth);integer(capture,15,maxHeight);integer(capture,18,uint64_t(fps));
+    integer(header,1,id);message(rpc,1,header);message(rpc,2,capture);
+    integer(out,1,id);integer(out,2,nowMs());message(out,21,rpc);return out;
+}
+
+Bytes quitSuperScreenRpc(uint64_t id){
+    if(!id)throw std::invalid_argument("Invalid request id");
+    Bytes header,rpc,out;
+    integer(header,1,id);message(rpc,1,header);message(rpc,14,{});
+    integer(out,1,id);integer(out,2,nowMs());message(out,21,rpc);return out;
+}
+
+Bytes enterSuperScreenRpc(uint64_t id,int w,int h){
+    if(!id || !streamSize(w,h))throw std::invalid_argument("Invalid super screen");
+    Bytes size,body,header,rpc,out;
+    integer(size,1,w);integer(size,2,h);
+    integer(body,1,1);message(body,2,size); // REASON_MANUAL
+    integer(header,1,id);message(rpc,1,header);message(rpc,26,body);
+    integer(out,1,id);integer(out,2,nowMs());message(out,21,rpc);return out;
+}
+
 Bytes qualityUpdateRpc(uint64_t id,int fps,int quality,int screenId,int customMbps,int dpiScale){
     if(!id || screenId<0 || !supportedCaptureRate(fps) || quality<1 || quality>6 ||
        customMbps<0 || customMbps>100 || (quality==6&&customMbps==0) ||
@@ -304,16 +335,18 @@ std::optional<ScreenSourceInfo> parseScreenSources(const uint8_t *data,size_t si
     Reader outer(data,size);Field f;
     while(outer.next(f))if(f.key==7){
         if(found || f.wire!=2)return {};found=true;
-        std::array<int,32> ids{};unsigned count=0;std::vector<ScreenSourceInfo> screens;
+        std::array<int,32> ids{};unsigned count=0;std::vector<ScreenSourceInfo> screens;std::vector<ScreenEntry> all;
         int current=0;bool currentPresent=false;
         Reader sources(f.data,f.size);Field source;
         while(sources.next(source)){
             if(source.key==1){
                 if(source.wire!=2 || count==ids.size())return {};
-                int id=0;bool idPresent=false;ScreenSourceInfo info;Reader screen(source.data,source.size);Field prop;
+                int id=0,fps=0;bool idPresent=false;ScreenSourceInfo info;Reader screen(source.data,source.size);Field prop;
                 while(screen.next(prop))if(prop.key==1){
                     if(idPresent || prop.wire!=0 || prop.value>uint64_t(INT32_MAX))return {};
                     idPresent=true;id=int(prop.value);
+                }else if(prop.key==2 && prop.wire==0 && prop.value<=1000){
+                    fps=int(prop.value);
                 }else if(prop.key==5 && prop.wire==0 && prop.value<=uint64_t(INT32_MAX)){
                     info.type=int(prop.value);
                 }else if(prop.key==3 || prop.key==4){
@@ -329,7 +362,8 @@ std::optional<ScreenSourceInfo> parseScreenSources(const uint8_t *data,size_t si
                 }
                 if(!screen.good())return {};
                 for(unsigned i=0;i<count;++i)if(ids[i]==id)return {};
-                ids[count++]=id;info.screenId=id;screens.push_back(std::move(info));
+                ids[count++]=id;info.screenId=id;all.push_back({id,info.type,info.width,info.height,fps});
+                screens.push_back(std::move(info));
             }else if(source.key==2){
                 if(currentPresent || source.wire!=0)return {};
                 currentPresent=true;
@@ -341,6 +375,7 @@ std::optional<ScreenSourceInfo> parseScreenSources(const uint8_t *data,size_t si
         // Protobuf's omitted int32 ID is zero; it is accepted only when the
         // complete advertised list contains that same ID. Never guess a screen.
         for(auto &s:screens)if(current>=0 && s.screenId==current){result=std::move(s);result.count=count;}
+        result.all=std::move(all);
     }
     if(!outer.good() || !found)return {};
     return result;
@@ -410,6 +445,14 @@ std::optional<CaptureRpcAck> parseCaptureRpcAck(const uint8_t *data,size_t size)
                     }
                 }
                 if(!capture.good())return {};
+            }else if((r.key==10 || r.key==22) && r.wire==2){
+                // Quit/EnterSuperScreenResponse{error_code=1}
+                result.superScreen=true;
+                Reader body(r.data,r.size);Field v;
+                while(body.next(v))if(v.key==1 && v.wire==0 && v.value){
+                    result.errorCode=int(int32_t(uint32_t(v.value)));++result.errors;
+                }
+                if(!body.good())return {};
             }else ++result.otherFields;
         }
         if(!rpc.good())return {};

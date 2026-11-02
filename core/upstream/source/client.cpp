@@ -142,6 +142,7 @@ void jsonFlatten(const Json &value,const std::string &path,std::string &out,unsi
 struct ForwardSettingInfo {
     std::string display,codecs,capture,encoder;
     int track=-1;
+    std::vector<std::pair<int,int>> displays; // host monitor id, refresh rate
     std::string summary() const {
         std::string out;
         auto append=[&](const std::string &value){
@@ -172,6 +173,10 @@ std::optional<ForwardSettingInfo> parseForwardSetting(const Json &event) {
             for(const auto &d:cap["display_info"]){
                 if(n++>=8)break;
                 if(!d.is_object())continue;
+                const auto id=d.find("id"),fps=d.find("fps");
+                if(id!=d.end() && id->is_number_integer() && id->get<int64_t>()>=0 && id->get<int64_t>()<=INT32_MAX)
+                    out.displays.emplace_back(id->get<int>(),fps!=d.end() && fps->is_number_integer()?
+                                              int(std::clamp<int64_t>(fps->get<int64_t>(),0,1000)):0);
                 if(!out.display.empty())out.display+=";";
                 out.display+="id"+std::to_string(d.value("id",0))+
                     "-fps"+std::to_string(d.value("fps",0))+
@@ -199,7 +204,7 @@ std::optional<ForwardSettingInfo> parseForwardSetting(const Json &event) {
         out.encoder=sender.value("encoder_impl",std::string{});
         out.track=sender.value("video_track_index",-1);
     }
-    if(out.display.empty() && out.codecs.empty() && out.capture.empty() &&
+    if(out.display.empty() && out.displays.empty() && out.codecs.empty() && out.capture.empty() &&
        out.encoder.empty() && out.track<0)return std::nullopt;
     return out;
 }
@@ -570,6 +575,18 @@ void Client::run() {
             }
             tickQuality();
             tickVideoScale();
+            if(pendingScreen_ && monotonicMs()>=pendingScreen_->deadline){
+                diagnostic("select-screen-timeout");
+                finishScreen("电脑没有切换显示器，请重试");
+            }
+            // GameViewer acks some monitors yet never encodes them (this PC's portrait one, 2026-11-02).
+            if(screenCheckAt_ && monotonicMs()>=screenCheckAt_){
+                screenCheckAt_=0;
+                if(media_ && media_->frameAgeMs()>3000){
+                    diagnostic("select-screen-no-frames");
+                    std::lock_guard lock(stateMutex_);state_.screenNotice="电脑没有发来这台显示器的画面，可以换回其他显示器";
+                }
+            }
             if(pendingPrivacy_ && monotonicMs()>=pendingPrivacy_->deadline){
                 pendingPrivacy_.reset();
                 std::lock_guard lock(stateMutex_);state_.privacyPending=false;state_.privacyKnown=false;
@@ -702,6 +719,41 @@ void Client::run() {
     cancel_ = false;
     disconnect();
 }
+// GameViewer's screen list (Main field 7) names only the streamed screen; forward_setting's
+// display_info names the host's monitors (all of them before streaming, then the streamed one).
+// Their union for this session, by id so the numbering stays put while either list changes.
+// The super screen keeps its type after a quit takes it off the screen list, so it can be put back.
+void Client::publishScreens() {
+    std::map<int,Json> all;
+    for(const auto &[id,fps]:hostDisplays_)all[id]={{"id",id},{"type",0},{"width",0},{"height",0},{"fps",fps}};
+    for(const auto &s:sourceScreens_)all[s.value("id",-1)]=s;
+    if(all.count(superScreen_))all[superScreen_]["type"]=2;
+    Json list=Json::array();
+    for(auto &[id,s]:all)list.push_back(std::move(s));
+    std::lock_guard lock(stateMutex_);state_.screens=std::move(list);
+}
+// Sends a screen selection, the super screen exit that has to come before it, or the super
+// screen's return (the official app's own requests, uuyc 4.45); false if it did not go out.
+bool Client::sendScreenRpc(int target,bool quit) {
+    const auto channel=channels_.find("TEXT_DATA_CHANNEL");
+    if(channel==channels_.end() || !channel->second->isOpen())return false;
+    const bool enter=!quit && target==superScreen_;
+    try{
+        const auto id=nextQualityRpc_;
+        const auto bytes=quit?quitSuperScreenRpc(id):enter?enterSuperScreenRpc(id,streamWidth_,streamHeight_):
+            selectScreenRpc(id,target,streamFps_,streamQuality_,hevc_,streamWidth_,streamHeight_,streamQuality_==6?maxBitrateMbps_:0);
+        channel->second->send(reinterpret_cast<const std::byte*>(bytes.data()),bytes.size());
+        pendingScreen_=PendingScreen{id,monotonicMs()+8000,target,quit};++nextQualityRpc_;
+        pickedScreen_=true;pendingVideoScale_.reset();
+    }catch(const std::exception &){return false;}
+    diagnostic(((quit?"quit-super-screen-for-":enter?"enter-super-screen-":"select-screen-request-")+
+                std::to_string(target)+"-from-"+std::to_string(activeScreenId_)).c_str());
+    return true;
+}
+void Client::finishScreen(const std::string &notice) {
+    pendingScreen_.reset();
+    std::lock_guard lock(stateMutex_);state_.screenRequested=-1;state_.screenNotice=notice;
+}
 void Client::handle(const Event &event) {
     const auto &e = event.type;
     const auto &data = event.data;
@@ -724,7 +776,25 @@ void Client::handle(const Event &event) {
             state_.desktopScale=data.value("scale",0);state_.desktopScaleRecommended=data.value("recommended_scale",0);
             state_.desktopScales=data.value("scales",std::vector<int>{});
             if(state_.desktopScale==state_.desktopScaleRequested)state_.desktopScaleRequested=0;
+            state_.screenCurrent=screen;
         }
+        sourceScreens_=data.value("screens",Json::array());
+        for(const auto &s:sourceScreens_)if(s.value("type",0)==2)superScreen_=s.value("id",-1);
+        publishScreens();
+        if(pendingScreen_ && screen==pendingScreen_->target){
+            // The super screen comes back at our size but encoded at most 1080 lines (1724x1080 for
+            // 2280x1428, 2026-11-02; the official app's phones are not taller). Ask for our size again.
+            const auto it=channels_.find("TEXT_DATA_CHANNEL");
+            if(screen==superScreen_ && it!=channels_.end() && it->second->isOpen()){
+                const auto bytes=captureSettingsRpc(nextQualityRpc_++,streamWidth_,streamHeight_,streamFps_,streamQuality_,screen,
+                                                    streamQuality_==6?maxBitrateMbps_:0);
+                it->second->send(reinterpret_cast<const std::byte*>(bytes.data()),bytes.size());
+                diagnostic("super-screen-size-request");
+            }
+            finishScreen("");screenCheckAt_=monotonicMs()+4000;
+        }
+        else if(pendingScreen_ && pendingScreen_->quitting && data.value("type",0)!=2 && !sendScreenRpc(pendingScreen_->target,false))
+            finishScreen("切换请求发送失败");
         // Dedicated desktop: the host brings the virtual display up at the size it
         // remembers for this client. Ask once for the stream size if it offers it.
         const int w=data.value("width",0),h=data.value("height",0);
@@ -932,7 +1002,7 @@ void Client::handle(const Event &event) {
             diagnostic((rpcMode+"-rpc-"+(sent?"sent-":"queued-")+std::to_string(id)).c_str());
         }catch(...){fallbackQuality("设置发送失败，正在重连应用…");}
     } else if(e=="quality-rpc-ack") {
-        if(pendingVideoScale_ && data.at("id").get<uint64_t>()==pendingVideoScale_->id){
+        if(pendingVideoScale_ &&data.at("id").get<uint64_t>()==pendingVideoScale_->id){
             if(pendingVideoScale_->acknowledged)return;
             if(data.value("errors",0u) || data.value("other",0u)){
                 pendingVideoScale_.reset();
@@ -950,6 +1020,14 @@ void Client::handle(const Event &event) {
         }
         if(desktopModeRpc_ && data.at("id").get<uint64_t>()==desktopModeRpc_){
             diagnostic(("desktop-mode-ack-errors-"+std::to_string(data.value("errors",0u))+"-code-"+std::to_string(data.value("code",0))).c_str());
+            return;
+        }
+        if(pendingScreen_ && data.at("id").get<uint64_t>()==pendingScreen_->id){
+            const auto errors=data.value("errors",0u),other=data.value("other",0u);const int code=data.value("code",0);
+            diagnostic(("select-screen-ack-errors-"+std::to_string(errors)+"-other-"+std::to_string(other)+"-code-"+std::to_string(code)+
+                        (data.value("super",false)?"-super":"")).c_str());
+            // Success shows up as the new current screen in the next screen list.
+            if(errors || other || code)finishScreen("电脑没有切换显示器，错误码 "+std::to_string(code));
             return;
         }
         if(desktopScaleRpc_ && data.at("id").get<uint64_t>()==desktopScaleRpc_){
@@ -1208,6 +1286,26 @@ void Client::handle(const Event &event) {
         }
         std::lock_guard lock(stateMutex_);state_.desktopScaleRequested=scale;state_.desktopScaleNotice.clear();
         diagnostic(("desktop-scale-request-"+std::to_string(scale)+"-from-"+std::to_string(state.desktopScale)).c_str());
+    } else if(e=="select-screen") {
+        // Stream another of the host's monitors; the host answers with a new screen list.
+        const int target=data.at("screen").get<int>();
+        const auto state=snapshot();
+        const auto channel=channels_.find("TEXT_DATA_CHANNEL");
+        if(target==activeScreenId_ || pendingScreen_)return;
+        auto refuse=[&](const char *notice){std::lock_guard lock(stateMutex_);state_.screenNotice=notice;};
+        if(!state.streaming || activeScreenId_<0 || channel==channels_.end() || !channel->second->isOpen()){
+            refuse("电脑通道尚未就绪，请稍后重试");return;
+        }
+        // A pending quality request names the current screen; switching under it reconnects.
+        if(pendingQuality_){refuse("画质设置仍在应用，请稍后再试");return;}
+        if(std::none_of(state.screens.begin(),state.screens.end(),[&](const Json &s){return s.value("id",-1)==target;})){
+            refuse("电脑的显示器已变化，请重新选择");return;
+        }
+        // In super screen the host streams a virtual display in place of its desktop; leave it first.
+        const bool super=std::any_of(sourceScreens_.begin(),sourceScreens_.end(),[&](const Json &s){
+            return s.value("id",-1)==activeScreenId_ && s.value("type",0)==2;});
+        if(!sendScreenRpc(target,super)){refuse("切换请求发送失败");return;}
+        std::lock_guard lock(stateMutex_);state_.screenRequested=target;state_.screenNotice="正在切换显示器…";
     } else if(e=="privacy-screen-ack") {
         if(!pendingPrivacy_ || data.at("id").get<uint64_t>()!=pendingPrivacy_->id)return;
         const auto requested=pendingPrivacy_->mode;pendingPrivacy_.reset();
@@ -1534,6 +1632,10 @@ void Client::dispatch(const SioPacket &p) {
             if(const auto info=parseForwardSetting(p.data)){
                 const auto summary=info->summary();
                 if(!summary.empty())diagnostic(("forward-setting-summary-"+summary).c_str());
+                if(!info->displays.empty()){
+                    for(const auto &[id,fps]:info->displays)hostDisplays_[id]=fps;
+                    publishScreens();
+                }
                 std::lock_guard lock(stateMutex_);
                 state_.serverDisplayInfo=info->display;
                 state_.serverCodecInfo=info->codecs;
@@ -1797,9 +1899,15 @@ void Client::beginPeer(const Json &result) {
                 if(auto queue=inbox.lock()){
                     std::lock_guard lock(queue->mutex);
                     if(queue->events.size()>124)return;
-                    if(screens)queue->events.push_back({"quality-screens",{{"screen",screens->screenId},{"count",screens->count},
-                        {"type",screens->type},{"width",screens->width},{"height",screens->height},{"modes",screens->modes},
-                        {"scale",screens->scale},{"recommended_scale",screens->recommendedScale},{"scales",screens->scales}},generation});
+                    if(screens){
+                        Json all=Json::array();
+                        for(const auto &s:screens->all)
+                            all.push_back({{"id",s.id},{"type",s.type},{"width",s.width},{"height",s.height},{"fps",s.fps}});
+                        queue->events.push_back({"quality-screens",{{"screen",screens->screenId},{"count",screens->count},
+                            {"type",screens->type},{"width",screens->width},{"height",screens->height},{"modes",screens->modes},
+                            {"scale",screens->scale},{"recommended_scale",screens->recommendedScale},{"scales",screens->scales},
+                            {"screens",std::move(all)}},generation});
+                    }
                     if(settingSync)queue->events.push_back({"capture-setting-sync",
                         {{"fields",settingSync->fields},
                          {"fps",settingSync->fps},{"quality",settingSync->quality},
@@ -1814,7 +1922,7 @@ void Client::beginPeer(const Json &result) {
                         const auto summary=screenSourceWireSummary(bytes,size);
                         if(!summary.empty())queue->events.push_back({"screen-wire",summary,generation});
                     }
-                    if(ack)queue->events.push_back({"quality-rpc-ack",{{"id",ack->requestId},{"capture",ack->capture},{"errors",ack->errors},{"entries",ack->entries},{"code",ack->errorCode},{"other",ack->otherFields}},generation});
+                    if(ack)queue->events.push_back({"quality-rpc-ack",{{"id",ack->requestId},{"capture",ack->capture},{"errors",ack->errors},{"entries",ack->entries},{"code",ack->errorCode},{"other",ack->otherFields},{"super",ack->superScreen}},generation});
                     if(textAck)queue->events.push_back({"text-input-ack",{{"id",textAck->requestId},{"status",textAck->status}},generation});
                     if(privacyAck)queue->events.push_back({"privacy-screen-ack",{{"id",privacyAck->requestId},{"code",privacyAck->errorCode},{"requested_mode",unsigned(privacyAck->requestedMode)},{"current_mode",unsigned(privacyAck->currentMode)}},generation});
                     queue->cv.notify_one();
@@ -2138,8 +2246,10 @@ void Client::disconnect() {
     {std::lock_guard lock(stateMutex_);state_.qualityPending=false;state_.settingApplyPending=false;
         state_.privacyPending=false;state_.privacyKnown=false;state_.privacyMode=PrivacyMode::Off;state_.privacyRequestedMode=PrivacyMode::Unknown;state_.privacyNotice.clear();
         state_.desktopVirtual=false;state_.desktopScale=state_.desktopScaleRecommended=state_.desktopScaleRequested=0;
-        state_.desktopScales.clear();state_.desktopScaleNotice.clear();}
-    desktopScaleRpc_=0;
+        state_.desktopScales.clear();state_.desktopScaleNotice.clear();
+        state_.screens=Json::array();state_.screenCurrent=state_.screenRequested=-1;state_.screenNotice.clear();}
+    desktopScaleRpc_=0;pendingScreen_.reset();pickedScreen_=false;hostDisplays_.clear();sourceScreens_=Json::array();
+    superScreen_=-1;screenCheckAt_=0;
     connectedSince_=0;
     if (strictVideo_)
         strictVideo_->shutdown();
@@ -2345,7 +2455,7 @@ void Client::tickVideoScale() {
     if(channel==channels_.end() || !channel->second->isOpen())return;
     // The desktop size request already set the encoder size; a scale request on
     // top makes the host put the old desktop size back (2026-11-02, d3 run).
-    if(activeScreenId_<0 || desktopModeRpc_)return;
+    if(activeScreenId_<0 || desktopModeRpc_ || pickedScreen_)return;
 
     if(pendingVideoScale_){
         const auto &request=*pendingVideoScale_;

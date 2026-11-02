@@ -4,11 +4,14 @@
 namespace uu {
 // Main.Message.simple_action belongs to CONTROL, not the clipboard/RPC TEXT channel.
 inline constexpr const char *systemActionChannel="CONTROL_DATA_CHANNEL";
-struct CaptureRpcAck {uint64_t requestId=0;unsigned errors=0,entries=0;int errorCode=0;bool capture=false;unsigned otherFields=0;};
+struct CaptureRpcAck {uint64_t requestId=0;unsigned errors=0,entries=0;int errorCode=0;bool capture=false;unsigned otherFields=0;bool superScreen=false;};
+// One screen of Main.screens, in the host's order, for switching monitors (fps = Screen field 2).
+struct ScreenEntry {int id=-1,type=0,width=0,height=0,fps=0;};
 // The current screen of Main.screens; type 1 is a virtual display, modes are
 // the desktop sizes it offers, scales its Windows display scales (Screen.dpi_scale).
+// `all` is every screen, the current one included.
 struct ScreenSourceInfo {int screenId=-1;unsigned count=0;int type=0,width=0,height=0;std::vector<std::pair<int,int>> modes;
-                        int scale=0,recommendedScale=0;std::vector<int> scales;};
+                        int scale=0,recommendedScale=0;std::vector<int> scales;std::vector<ScreenEntry> all;};
 struct CaptureSettingSyncInfo {
     unsigned fields=0; // bit0 fps, bit1 quality, bit2 width, bit3 height, bit4 bitrate
     int fps=0,quality=0,chroma=0,resolutionType=0,dpiScale=0,orientation=0;
@@ -33,6 +36,16 @@ Bytes captureSettingsRpc(uint64_t requestId,int width,int height,int fps,int qua
 // Selects a virtual display with a new desktop size from its modes and the
 // matching encoder size (v0.1.15 virtual_display "Initialize", GameViewer 4.44).
 Bytes desktopModeRpc(uint64_t requestId,int screenId,int width,int height,int fps,int quality,int customMbps=0);
+// Streams another of the host's screens with the CaptureSettingRequest the
+// official app (uuyc 4.45 ScreenViewModel) sends: ChooseType_DEFAULT with -1/-1
+// so the host sizes the stream, codec_type matching our track, our decoder max.
+Bytes selectScreenRpc(uint64_t requestId,int screenId,int fps,int quality,bool hevc,int maxWidth,int maxHeight,int customMbps=0);
+// Leaves GameViewer's super screen (an empty QuitSuperScreenRequest, RpcRequest field 14):
+// the host takes down the virtual display it put in place of its desktop.
+Bytes quitSuperScreenRpc(uint64_t requestId);
+// Puts the super screen back at this size (EnterSuperScreenRequest, RpcRequest
+// field 26: reason MANUAL, resolution), as the official app's 超级屏 does.
+Bytes enterSuperScreenRpc(uint64_t requestId,int width,int height);
 // Protocol-native settings: Main.RpcRequest field3/4 with their dedicated
 // FpsSettingRequest / VideoQualitySettingReqeust bodies.
 Bytes fpsSettingRpc(uint64_t requestId,int fps);
