@@ -31,6 +31,7 @@ namespace {
 constexpr uint32_t OUT = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, CAP = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 constexpr unsigned kOutBuffers = 8;
 constexpr size_t kOutBytes = 4u << 20; // the strict receiver's AU limit
+constexpr int64_t kWedgedUs = 1000000;  // input taken, no picture: decoding takes ~4 ms
 
 int64_t mediaClockMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -142,6 +143,7 @@ struct Media::Impl {
     std::vector<uint32_t> outFree;
     std::array<int64_t, 64> sentUs{};
     uint64_t sequence = 0;
+    int64_t pendingSinceUs = 0; // first input since the last picture
     int64_t fpsWindowUs = 0;
     int fpsFrames = 0;
 
@@ -229,12 +231,20 @@ struct Media::Impl {
                 failed = false;
             }
             if (resyncNow) waitKey = true;
+            // iris once stopped taking input and returning pictures, without an error, right after a
+            // same-size SOURCE_CHANGE redone in place (2026-11-02: frozen 110 s until disconnect, ~130
+            // IDRs fed in vain). A fresh device starts at the next IDR, as after a size change.
+            if (fd >= 0 && pendingSinceUs && monoUs() - pendingSinceUs > kWedgedUs) {
+                diagnostic("v4l2-reopen-on-stall");
+                closeDevice();
+                keyframeRequested = true;
+            }
             if (unit) {
                 submit(*unit);
                 continue;
             }
             pollfd p[2] = {{pollable ? fd : -1, POLLIN | POLLOUT | POLLPRI, 0}, {wakeFd, POLLIN, 0}};
-            if (poll(p, 2, -1) < 0 && errno != EINTR) throw std::runtime_error("poll failed");
+            if (poll(p, 2, pendingSinceUs ? 100 : -1) < 0 && errno != EINTR) throw std::runtime_error("poll failed");
             if (p[1].revents) {
                 uint64_t count;
                 (void)!read(wakeFd, &count, sizeof count);
@@ -322,6 +332,7 @@ struct Media::Impl {
         capOn = false;
         pollable = true;
         waitKey = true;
+        pendingSinceUs = 0;
     }
     void submit(const Unit &u) {
         const bool key = u.keyframe ? *u.keyframe : keyframe(u.data.data(), u.data.size(), u.hevc);
@@ -357,6 +368,7 @@ struct Media::Impl {
             return;
         }
         outFree.pop_back();
+        if (!pendingSinceUs) pendingSinceUs = monoUs();
         waitKey = false;
         pollable = true;
     }
@@ -510,6 +522,7 @@ struct Media::Impl {
         }
         ++fpsFrames;
         ++decoded;
+        pendingSinceUs = 0;
         lastDecodedMs = mediaClockMs();
         int64_t displaced = -1;
         {
