@@ -142,6 +142,7 @@ sh packaging/deb.sh out
 
 - `deb.sh` 要求 `build/libyouyou_core.so` 和 `app/target/release/youyou` 已经编好。版本号取 `app/Cargo.toml`；共享库依赖由 `dpkg-shlibdeps` 从二进制算出来，再加上运行时才打开的 EGL/GLES、fontconfig、字体和 CA 证书。
 - 用 Release 里的源码包 `youyou-linux-<版本>.tar.xz` 构建时不用联网：原生依赖已经在里面（`fetch_deps.py`、`patch_deps.py` 发现做过就跳过），Rust 库在 `vendor/`，`.cargo/config.toml` 让 cargo 只用它。
+- 没发版的修复要先装给 Y700 用时，打成测试包：照常 `deb.sh`，再用 `dpkg-deb -R` 解开，把 `DEBIAN/control` 的版本改成 `<版本>+<提交号>`（如 `0.2.2+0df73f3`），重新 `dpkg-deb --root-owner-group --build`。解开用的临时目录要先 `chmod 755`，原因见「踩过的坑」里的 deb 根目录权限。这个版本号排在该版之后、下一版之前，`dpkg -l` 一眼就能看出装的是测试包；下一版正式包能直接盖上去。
 - 自测程序在 `build/` 下：`protocol_test`（无依赖）、`decode_test <片段.h264|.hevc> [帧率]`（要 iris 解码器；FFmpeg 只用来读片段）。
 
 ## 实现要点
