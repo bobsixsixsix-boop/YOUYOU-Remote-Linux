@@ -2,7 +2,7 @@
 
 在联想拯救者 Y700（Ubuntu 26.04 ARM64 + KDE Plasma）上串流 Windows 电脑，可以用触屏、键盘鼠标或手柄（拯救者 G9、Xbox 手柄）操作。电脑上装官方 UU 远程（GameViewer），和平板登录同一个账号。
 
-v0.2 是重写版，只保留上游的协议核心。解码直接走 V4L2 硬件解码，画面零拷贝交给 GPU，默认开帧节奏器。现在还没发布，只能自己构建（见「构建」），GitHub 上的 Release 还是 v0.1.15。
+v0.2 是重写版，只保留上游的协议核心。解码直接走 V4L2 硬件解码，画面零拷贝交给 GPU，默认开帧节奏器。
 
 ## 感谢两位 Switch 客户端作者
 
@@ -11,10 +11,10 @@ v0.2 是重写版，只保留上游的协议核心。解码直接走 V4L2 硬件
 
 ## 安装
 
-在 Y700 上构建出 deb（见「构建」），然后：
+在 Y700 上下载最新的 `youyou-linux_<版本>_arm64.deb`，在它所在的目录里运行下面的命令。也可以自己构建（见「构建」）。[下载安装包](https://github.com/bobsixsixsix-boop/YOUYOU-Remote-Linux/releases/latest)
 
 ```sh
-sudo apt install ./out/youyou-linux_0.2.0_arm64.deb
+sudo apt install ./youyou-linux_0.2.0_arm64.deb
 ```
 
 - 包名还是 `youyou-linux`，会直接替换 v0.1.15。登录状态在 `~/.local/state/youyou-linux/`，升级后不用重新登录。
@@ -111,6 +111,7 @@ youyou import-apk <APK> | import-key <signing.key> | download-key
 | `assets/icons/*.svg` | 界面图标（7 个），编进程序里（`ui.rs` 的 `ICONS`）。 |
 | `assets/launcher.svg` | 双屏启动器图形，也是 deb 里的 SVG 图标。由它生成 `youyou-linux.png`（256 px，deb 图标）和 `youyou-mark-192.rgba`（192×192 RGBA8，登录页和首页的标志）。 |
 | `packaging/deb.sh` | 在 Y700 上从构建结果打 deb，见「构建」。 |
+| `packaging/source.sh` | 发版用的完整源码包：tag 导出的源码 + 上游锁定的原生依赖（`core/upstream/external`）+ `cargo vendor` 出的 Rust 库，解开就能离线构建。 |
 | `packaging/licenses.py` | 生成 deb 里的 `copyright`：本项目和上游的许可与作者声明、静态链接进核心库的原生依赖（按上游 `sources.lock.json`）、实际链接的 59 个 Rust 库（`cargo metadata`，按 `Cargo.lock` 的校验值）。 |
 | `packaging/THIRD-PARTY.md`、`NOTICE.md` | 来源与许可说明、作者致谢。 |
 | `packaging/youyou-linux.desktop` | 菜单项。`StartupWMClass=youyou-linux` 和程序的 app_id 对上，KWin 才能找到图标。 |
@@ -139,6 +140,7 @@ sh packaging/deb.sh out
 ```
 
 - `deb.sh` 要求 `build/libyouyou_core.so` 和 `app/target/release/youyou` 已经编好。版本号取 `app/Cargo.toml`；共享库依赖由 `dpkg-shlibdeps` 从二进制算出来，再加上运行时才打开的 EGL/GLES、fontconfig、字体和 CA 证书。
+- 用 Release 里的源码包 `youyou-linux-<版本>.tar.xz` 构建时不用联网：原生依赖已经在里面（`fetch_deps.py`、`patch_deps.py` 发现做过就跳过），Rust 库在 `vendor/`，`.cargo/config.toml` 让 cargo 只用它。
 - 自测程序在 `build/` 下：`protocol_test`（无依赖）、`decode_test <片段.h264|.hevc> [帧率]`（要 iris 解码器；FFmpeg 只用来读片段）。
 
 ## 实现要点
@@ -259,7 +261,12 @@ n1 和 n2 一样的程序、一样的设置，差了 3.6 个百分点。看 `ml-
 - [ ] `git subtree pull` 上游之后：改 `packaging/licenses.py` 的 `UPSTREAM_REF`、`packaging/THIRD-PARTY.md` 和 `NOTICE.md` 里的提交号；跑 `protocol_test`、`decode_test`；真机连一次。
 - [ ] 改了 `assets/launcher.svg`：重新生成 `assets/youyou-linux.png`（256×256）和 `assets/youyou-mark-192.rgba`（192×192，RGBA8 直排）。
 - [ ] 加、删 Rust 依赖之后：打一次 deb，看 `licenses.py` 有没有报缺许可文本。
-- [ ] 发版：改 `app/Cargo.toml` 的版本 → 构建、跑全部自测 → `deb.sh` → 装到 Y700 上从菜单打开，连一次电脑、侧滑开关菜单、断开 → 推 GitHub、发 Release（每次都要主人点头）。
+- [ ] 发版（推 GitHub、发 Release 每次都要主人点头）：
+  1. 改 `app/Cargo.toml` 的版本和 README 里安装命令的文件名，commit、push，打 tag `v<版本>` 并推送。
+  2. 在 Y700 上把 tag 用 `git archive` 导出成干净目录，跑 `fetch_deps.py`、`patch_deps.py`，再 `sh packaging/source.sh out`。
+  3. 把这个源码包解到另一个目录，按「构建」离线编一遍、跑全部自测，再 `deb.sh`。发出去的 deb 就是从发出去的源码包编出来的。
+  4. 装到 Y700 上从菜单打开，连一次电脑、侧滑开关菜单、断开。
+  5. `sha256sum` 两个文件写进 `SHA256SUMS`，三个文件一起传到 GitHub Release。
 - [ ] GameViewer 大版本更新之后：重测专用桌面上的防窥（还回不回 508）、AV1（`CodecType` 有没有加）、码率上限回报。
 
 ## 许可与资源
