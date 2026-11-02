@@ -585,6 +585,11 @@ void Client::run() {
                 if(media_ && media_->frameAgeMs()>3000){
                     diagnostic("select-screen-no-frames");
                     std::lock_guard lock(stateMutex_);state_.screenNotice="电脑没有发来这台显示器的画面，可以换回其他显示器";
+                }else if(media_ && (activeScreenId_==superScreen_ || snapshot().desktopVirtual)){
+                    // The request sent with the switch is sometimes lost while the host still brings
+                    // the screen up at its default size (2026-11-02): ask once more.
+                    const auto m=media_->stats();
+                    if(m.width!=streamWidth_ || m.height!=streamHeight_)requestStreamSize(activeScreenId_);
                 }
             }
             if(pendingPrivacy_ && monotonicMs()>=pendingPrivacy_->deadline){
@@ -732,6 +737,17 @@ void Client::publishScreens() {
     for(auto &[id,s]:all)list.push_back(std::move(s));
     std::lock_guard lock(stateMutex_);state_.screens=std::move(list);
 }
+// The super screen and the dedicated desktop's virtual display come back at our size but encoded
+// at most 1080 lines (1724x1080 for 2280x1428, 2026-11-02; the official app's phones are not
+// taller). Asks for our size on that screen again.
+void Client::requestStreamSize(int screen) {
+    const auto it=channels_.find("TEXT_DATA_CHANNEL");
+    if(it==channels_.end() || !it->second->isOpen())return;
+    const auto bytes=captureSettingsRpc(nextQualityRpc_++,streamWidth_,streamHeight_,streamFps_,streamQuality_,screen,
+                                        streamQuality_==6?maxBitrateMbps_:0);
+    it->second->send(reinterpret_cast<const std::byte*>(bytes.data()),bytes.size());
+    diagnostic("screen-size-request");
+}
 // Sends a screen selection, the super screen exit that has to come before it, or the super
 // screen's return (the official app's own requests, uuyc 4.45); false if it did not go out.
 bool Client::sendScreenRpc(int target,bool quit) {
@@ -761,7 +777,11 @@ void Client::handle(const Event &event) {
         reconnectArmed_=false;reconnectAt_=0;reconnectAttempts_=0;
     }
     if(e=="quality-screens") {
-        const int screen=data.at("screen").get<int>();
+        int screen=data.at("screen").get<int>();
+        // Protobuf leaves out a current ID of 0: in a dedicated desktop session the list then holds
+        // only the virtual display while monitor 0, picked from the drawer, streams (2026-11-02).
+        if(screen<0 && data.value("omitted",false) && (pendingScreen_?pendingScreen_->target==0:pickedScreen_ && activeScreenId_==0))
+            screen=0;
         if(screen!=activeScreenId_){
             activeScreenId_=screen;
             pendingVideoScale_.reset();videoScaleAttempted_=false;videoScaleVerified_=false;nextVideoScaleCheck_=0;
@@ -782,15 +802,7 @@ void Client::handle(const Event &event) {
         for(const auto &s:sourceScreens_)if(s.value("type",0)==2)superScreen_=s.value("id",-1);
         publishScreens();
         if(pendingScreen_ && screen==pendingScreen_->target){
-            // The super screen comes back at our size but encoded at most 1080 lines (1724x1080 for
-            // 2280x1428, 2026-11-02; the official app's phones are not taller). Ask for our size again.
-            const auto it=channels_.find("TEXT_DATA_CHANNEL");
-            if(screen==superScreen_ && it!=channels_.end() && it->second->isOpen()){
-                const auto bytes=captureSettingsRpc(nextQualityRpc_++,streamWidth_,streamHeight_,streamFps_,streamQuality_,screen,
-                                                    streamQuality_==6?maxBitrateMbps_:0);
-                it->second->send(reinterpret_cast<const std::byte*>(bytes.data()),bytes.size());
-                diagnostic("super-screen-size-request");
-            }
+            if(screen==superScreen_ || data.value("type",0)==1)requestStreamSize(screen);
             finishScreen("");screenCheckAt_=monotonicMs()+4000;
         }
         else if(pendingScreen_ && pendingScreen_->quitting && data.value("type",0)!=2 && !sendScreenRpc(pendingScreen_->target,false))
@@ -1905,7 +1917,7 @@ void Client::beginPeer(const Json &result) {
                             all.push_back({{"id",s.id},{"type",s.type},{"width",s.width},{"height",s.height},{"fps",s.fps}});
                         queue->events.push_back({"quality-screens",{{"screen",screens->screenId},{"count",screens->count},
                             {"type",screens->type},{"width",screens->width},{"height",screens->height},{"modes",screens->modes},
-                            {"scale",screens->scale},{"recommended_scale",screens->recommendedScale},{"scales",screens->scales},
+                            {"scale",screens->scale},{"recommended_scale",screens->recommendedScale},{"scales",screens->scales},{"omitted",screens->currentOmitted},
                             {"screens",std::move(all)}},generation});
                     }
                     if(settingSync)queue->events.push_back({"capture-setting-sync",

@@ -11,7 +11,8 @@ struct ScreenEntry {int id=-1,type=0,width=0,height=0,fps=0;};
 // the desktop sizes it offers, scales its Windows display scales (Screen.dpi_scale).
 // `all` is every screen, the current one included.
 struct ScreenSourceInfo {int screenId=-1;unsigned count=0;int type=0,width=0,height=0;std::vector<std::pair<int,int>> modes;
-                        int scale=0,recommendedScale=0;std::vector<int> scales;std::vector<ScreenEntry> all;};
+                        int scale=0,recommendedScale=0;std::vector<int> scales;std::vector<ScreenEntry> all;
+                        bool currentOmitted=false;}; // no current ID on the wire (protobuf drops a 0)
 struct CaptureSettingSyncInfo {
     unsigned fields=0; // bit0 fps, bit1 quality, bit2 width, bit3 height, bit4 bitrate
     int fps=0,quality=0,chroma=0,resolutionType=0,dpiScale=0,orientation=0;

@@ -43,10 +43,15 @@ int main() {
     // every screen, in the host's order, for the monitor switch
     assert(s->all.size() == 2 && s->all[0].id == 0 && s->all[0].type == 0 && s->all[0].width == 2560 && s->all[0].height == 1440);
     assert(s->all[0].fps == 165 && s->all[1].id == 14 && s->all[1].type == 1 && s->all[1].width == 2560 && s->all[1].fps == 0);
-    Bytes gone, goneMain; // current id 9 is not in the list: no current screen, the list stays
-    message(gone, 1, physical); integer(gone, 2, 9); message(goneMain, 7, gone);
+    Bytes gone, goneMain; // current id 9 is not in the list (a monitor picked in a dedicated desktop session)
+    message(gone, 1, virt); integer(gone, 2, 9); message(goneMain, 7, gone);
     const auto g = uu::parseScreenSources(goneMain.data(), goneMain.size());
-    assert(g && g->screenId == -1 && g->count == 1 && g->all.size() == 1 && g->all[0].id == 0);
+    assert(g && g->screenId == 9 && g->type == 0 && g->width == 0 && g->count == 1 && g->all.size() == 1 && g->all[0].id == 14);
+    assert(!g->currentOmitted && !s->currentOmitted);
+    Bytes none, noneMain; // no current id and no screen 0 listed: no current screen, flagged for the client
+    message(none, 1, virt); message(noneMain, 7, none);
+    const auto n = uu::parseScreenSources(noneMain.data(), noneMain.size());
+    assert(n && n->screenId == -1 && n->count == 1 && n->currentOmitted);
 
     // a malformed size or scale list keeps the screen id; unpacked scales parse too
     Bytes odd, oddDpi, oddSources, oddMain;

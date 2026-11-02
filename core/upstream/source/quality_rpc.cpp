@@ -375,7 +375,10 @@ std::optional<ScreenSourceInfo> parseScreenSources(const uint8_t *data,size_t si
         // Protobuf's omitted int32 ID is zero; it is accepted only when the
         // complete advertised list contains that same ID. Never guess a screen.
         for(auto &s:screens)if(current>=0 && s.screenId==current){result=std::move(s);result.count=count;}
-        result.all=std::move(all);
+        // An ID the host sent is not a guess: in a dedicated desktop session the list holds only
+        // the virtual display while a monitor picked from it streams (2026-11-02).
+        if(result.screenId<0 && currentPresent && current>0)result.screenId=current;
+        result.all=std::move(all);result.currentOmitted=!currentPresent;
     }
     if(!outer.good() || !found)return {};
     return result;

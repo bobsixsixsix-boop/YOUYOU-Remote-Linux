@@ -180,6 +180,7 @@ class Client {
     void publishScreens();
     void finishScreen(const std::string &notice);
     bool sendScreenRpc(int target,bool quit);
+    void requestStreamSize(int screen);
     bool rtxEnabled_ = false;
     bool sdpDumpDone_ = false;
     Json qr_;
