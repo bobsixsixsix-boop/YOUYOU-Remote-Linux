@@ -14,7 +14,7 @@ v0.2 是重写版，只保留上游的协议核心。解码直接走 V4L2 硬件
 在 Y700 上下载最新的 `youyou-linux_<版本>_arm64.deb`，在它所在的目录里运行下面的命令。也可以自己构建（见「构建」）。[下载安装包](https://github.com/bobsixsixsix-boop/YOUYOU-Remote-Linux/releases/latest)
 
 ```sh
-sudo apt install ./youyou-linux_0.2.1_arm64.deb
+sudo apt install ./youyou-linux_0.2.2_arm64.deb
 ```
 
 - 包名还是 `youyou-linux`，会直接替换 v0.1.15。登录状态在 `~/.local/state/youyou-linux/`，升级后不用重新登录。
