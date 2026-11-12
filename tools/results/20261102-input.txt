@@ -1,4 +1,4 @@
-Pad, F8 and privacy screen against the real host: Y700 -> SEIHAKUNOPC (GameViewer 4.45), 2026-11-02.
+Pad, F8 and privacy screen against the real host: Y700 -> the main PC (GameViewer 4.45), 2026-11-02.
 Tablet: tools/vpad.py (uinput clone of a wired Xbox 360 pad as xpad creates it, plus a
 keyboard), taps through y700's vtouch. PC: tools/input-watch.py logging XInput and the
 console display state. Raw: runs/input-1 (dedicated desktop), runs/input-2 (physical screen).

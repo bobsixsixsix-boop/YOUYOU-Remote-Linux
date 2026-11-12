@@ -1,5 +1,5 @@
 Frame pacer A/B over the real network: tools/desktop-run.py on the Y700, 2026-11-02.
-SEIHAKUNOPC desktop, 2280x1428@120, H.265, 100 Mbps cap (the host reported
+The main PC's desktop, 2280x1428@120, H.265, 100 Mbps cap (the host reported
 100 applied), panel 120 Hz. Three pairs back to back, 60 s connected each,
 ml-flips.py counting KWin page flips for 30 s. YY_PACE=1 = pacer ("流畅"),
 YY_PACE=0 = newest picture, swap interval 0 ("低延迟"). Raw: runs/ab{1,2,3}-pace{0,1}/.
